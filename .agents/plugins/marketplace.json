@@ -1,0 +1,20 @@
+{
+  "name": "wossoft-agent-skills",
+  "interface": {
+    "displayName": "Wossoft Agent Skills"
+  },
+  "plugins": [
+    {
+      "name": "retail-alpha-advisor",
+      "source": {
+        "source": "local",
+        "path": "./plugins/retail-alpha-advisor"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

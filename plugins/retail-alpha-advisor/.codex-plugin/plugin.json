@@ -1,0 +1,33 @@
+{
+  "name": "retail-alpha-advisor",
+  "version": "0.1.0",
+  "description": "Evidence-backed A-share portfolio review and investment research using fault-tolerant AKShare data tools.",
+  "author": {
+    "name": "Wossoft",
+    "url": "https://gitlab.com/wossoft"
+  },
+  "repository": "https://gitlab.com/wossoft/agent-skills",
+  "keywords": [
+    "a-share",
+    "akshare",
+    "portfolio",
+    "investment-research"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Retail Alpha Advisor",
+    "shortDescription": "A股持仓评估、股票与行业研究及仓位信号",
+    "longDescription": "使用带多数据源容错的 AKShare 工具获取行情、公司主营、财务、估值和行业证据，为已有持仓或未来候选标的生成可审计的人工决策建议。",
+    "developerName": "Wossoft",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read"
+    ],
+    "defaultPrompt": [
+      "评估我的现有持仓并给出保持、加仓、减仓或退出建议。",
+      "研究一只 A 股，给出证据充分的候选持仓信号。",
+      "分析一个行业，并映射到值得继续研究的股票或 ETF。"
+    ]
+  }
+}
