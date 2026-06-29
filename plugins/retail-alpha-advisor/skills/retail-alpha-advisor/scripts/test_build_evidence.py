@@ -88,8 +88,9 @@ class BuildEvidenceTests(unittest.TestCase):
                 {
                     "id": "s1",
                     "title": "official source",
-                    "provider": "AKShare",
-                    "function": "stock_zh_a_hist",
+                    "provider": "westockdata",
+                    "provider_version": "westock-data-clawhub@1.0.4",
+                    "command": "kline",
                     "retrieved_date": self.today.isoformat(),
                 }
             ],

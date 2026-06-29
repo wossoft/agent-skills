@@ -1,4 +1,4 @@
 interface:
   display_name: "Retail Alpha Advisor"
-  short_description: "Evidence-backed A-share portfolio and research signals"
-  default_prompt: "Use $retail-alpha-advisor to evaluate my holdings or research an A-share stock or industry and produce an evidence-backed position signal."
+  short_description: "Evidence-backed portfolio signals using westockdata"
+  default_prompt: "Use $retail-alpha-advisor to evaluate my holdings or research an A-share stock, ETF, or industry with westockdata evidence and explicit risk gates."

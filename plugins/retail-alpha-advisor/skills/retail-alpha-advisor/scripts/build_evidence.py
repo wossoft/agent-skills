@@ -218,7 +218,9 @@ def source_evidence(snapshot: dict[str, Any], gaps: list[str]) -> tuple[list[dic
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
             raise ValueError(f"sources[{index}] must be an object")
-        missing = [field for field in ("id", "title", "provider", "function", "retrieved_date") if not item.get(field)]
+        missing = [field for field in ("id", "title", "provider", "retrieved_date") if not item.get(field)]
+        if not item.get("command") and not item.get("function"):
+            missing.append("command")
         if missing:
             gaps.append(f"sources[{index}] missing: {', '.join(missing)}")
         else:
@@ -231,8 +233,10 @@ def source_evidence(snapshot: dict[str, Any], gaps: list[str]) -> tuple[list[dic
                     "title",
                     "provider",
                     "provider_version",
+                    "command",
                     "function",
                     "upstream",
+                    "parameters",
                     "data_date",
                     "retrieved_date",
                     "url",

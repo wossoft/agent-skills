@@ -1,11 +1,13 @@
 ---
 name: retail-alpha-advisor
-description: Evaluate existing A-share and ETF holdings, research candidate stocks, ETFs, or industries, and produce evidence-backed position signals with explicit risk gates. Use when an agent needs to answer whether to hold, add, reduce, or exit an existing position; assess portfolio concentration or industry exposure; analyze a future holding candidate; or turn AKShare market, financial, valuation, news, and industry data into an auditable manual-trading recommendation.
+description: Evaluate existing A-share and ETF holdings, research candidate stocks, ETFs, or industries, and produce evidence-backed position signals with explicit risk gates. Use when an agent needs to answer whether to hold, add, reduce, or exit an existing position; assess portfolio concentration or industry exposure; analyze a future holding candidate; or turn Tencent westockdata market, financial, valuation, fund-flow, ETF, and industry data into an auditable manual-trading recommendation.
 ---
 
 # Retail Alpha Advisor
 
-Use AKShare-backed functions to collect evidence, then produce research and position recommendations. Keep all execution manual. Never place orders or present model judgment as market fact.
+Use the Tencent-provided `westockdata` skill for market data, then produce research and position recommendations. Keep all execution manual. Never place orders or present model judgment as market fact.
+
+This skill owns analysis, evidence normalization, risk gates, and recommendation wording. It does not own data scraping, provider fallback logic, or local market-data wrappers.
 
 ## Select the workflow
 
@@ -13,31 +15,26 @@ Use AKShare-backed functions to collect evidence, then produce research and posi
 - Use `research` for a stock, ETF, or industry that is not yet held, including watchlist scans and prospective position signals.
 - Run both workflows separately when the request mixes current holdings and new candidates. Do not blend their evidence or action labels.
 
-## Collect data with the bundled functions
+## Collect data with westockdata
 
-Read [references/akshare-tools.md](references/akshare-tools.md), then call only the functions needed for the request. The callable registry and JSON schemas are in `scripts/akshare_tools.py`.
+Read [references/westockdata-data.md](references/westockdata-data.md), then use the `westockdata` skill for only the data needed by the request.
 
 ```bash
-uv run --with 'akshare>=1.17,<2.0' \
-  python .agents/skills/retail-alpha-advisor/scripts/akshare_tools.py schema
-
-uv run --with 'akshare>=1.17,<2.0' \
-  python .agents/skills/retail-alpha-advisor/scripts/akshare_tools.py call \
-  --name get_price_history \
-  --arguments '{"symbol":"600519","start_date":"20250101","end_date":"20260629"}'
+npx -y westock-data-clawhub@1.0.4 kline sh600519 --period day --limit 121
+npx -y westock-data-clawhub@1.0.4 finance sh600519 --num 4
+npx -y westock-data-clawhub@1.0.4 technical sh600519 --group ma,macd,rsi
 ```
 
-Another agent runtime may import `get_tool_definitions()` and `call_tool(name, arguments)` directly and expose them as native function tools.
-
-1. For `portfolio-review`, obtain holdings, cost prices, weights, cash, and risk limits from the user. AKShare cannot know the user's portfolio.
-2. Resolve each instrument and fetch adjusted daily prices. Fetch stock company/business information, financials, and valuation when the holding thesis depends on company fundamentals.
-3. For `research`, fetch the target profile, company/business information, price history, and, for stocks, financials and valuation. Fetch industry constituents/history for industry context. News is a secondary discovery source, not authoritative evidence.
-4. Preserve every tool response's AKShare version, underlying function, upstream label, retrieval time, parameters, and latest data date.
-5. Use the configured same-semantics provider chain when an endpoint fails. Preserve ordered `attempts`, the failure reason, `selected_provider`, and `selected_function`; never switch source silently.
+1. For `portfolio-review`, obtain holdings, cost prices, weights, cash, and risk limits from the user. westockdata cannot know the user's portfolio.
+2. Convert user symbols to westockdata format before querying: `sh600000`, `sz000001`, `bj430047`, `hk00700`, or `usAAPL`.
+3. Resolve each instrument and fetch daily prices. Fetch profile, finance, valuation/technical, fund-flow, ETF holdings/NAV, or industry data only when the holding thesis depends on that dimension.
+4. For `research`, fetch the target profile, price history, and, for stocks, finance/valuation/business evidence. For ETFs, fetch ETF detail, holdings, NAV, holder/concentration data when available. Fetch industry or board data for industry context.
+5. Preserve every command's provider (`westockdata`), package (`westock-data-clawhub@1.0.4` when used), command name, retrieval time, parameters, latest data date, and currency/unit notes.
+6. If westockdata lacks a field or fails, record the gap. Do not recreate a local scraper or fall back to AKShare inside this skill.
 
 ## Build the evidence pack
 
-Normalize holdings plus tool responses into [references/input-schema.md](references/input-schema.md). Keep facts, deterministic calculations, and agent judgments separate. Never invent unavailable fields.
+Normalize holdings plus westockdata responses into [references/input-schema.md](references/input-schema.md). Keep facts, deterministic calculations, and agent judgments separate. Never invent unavailable fields.
 
 Run:
 
@@ -73,7 +70,8 @@ For existing holdings, compare the latest position weight with both portfolio co
 ## Preserve the boundary
 
 - Do not trade, connect to a broker, store credentials, or modify any application/database state.
-- Do not claim that AKShare or its upstream sites are authoritative company filings.
+- Do not claim that westockdata, Tencent, or their upstream public-market sources are authoritative company filings.
 - Cross-check material company conclusions against primary disclosures when retrieval tools are available; otherwise state that the conclusion uses aggregator data only.
 - Do not infer missing cost basis, cash, holdings, industry classification, or risk limits.
+- Do not add back bundled market-data collection scripts to this skill unless the user explicitly reverses the westockdata boundary.
 - End with `市场有风险，投资需谨慎。`
