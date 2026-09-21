@@ -1,0 +1,354 @@
+#!/usr/bin/env bash
+# 把 TASK 文件派给 headless worker CLI，并收回摘要与 diff。
+set -euo pipefail
+
+resolve_script() {
+  local source="${BASH_SOURCE[0]}"
+  while [[ -L "$source" ]]; do
+    local link
+    link="$(readlink "$source")"
+    if [[ "$link" == /* ]]; then
+      source="$link"
+    else
+      source="$(cd "$(dirname "$source")" && pwd)/$link"
+    fi
+  done
+  cd "$(dirname "$source")" && pwd
+}
+
+SCRIPT_DIR="$(resolve_script)"
+SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+TEMPLATE="$SKILL_DIR/references/task-template.md"
+AGENTS_HOME="${AGENT_RUN_HOME:-$HOME/.agents}"
+DEFAULT_TIMEOUT="${AGENT_RUN_TIMEOUT:-1200}"
+INSTALL_TARGET="${AGENT_RUN_INSTALL:-$HOME/.local/bin/agent-run}"
+
+WORKER_CONTRACT='You are an implementation worker for a single assigned task.
+
+Complete only the task below. Do not re-delegate. Do not invoke orchestrate. Do not call agent-run.
+
+Follow applicable repository instructions and the authorization boundaries in the task.
+Preserve existing user changes. Do not commit, push, publish, delete user data, or change global configuration unless the task explicitly authorizes it.
+Stay inside Scope. Run the named verification. If blocked by permissions or missing context, report the blocker; do not bypass controls.
+
+When finished, return:
+1. implementation summary
+2. changed files
+3. checks performed
+4. failed checks, if any
+5. known risks
+6. anything requiring reviewer attention'
+
+usage() {
+  cat <<'EOF'
+Usage:
+  agent-run <worker> <task-file> [options]
+  agent-run init-task <slug> [options]
+  agent-run --install
+
+Workers: claude, agy, grok, codex
+
+Options:
+  --cwd DIR          Working directory (default: current git root, else pwd)
+  --timeout SECONDS  Kill the worker after N seconds (default: 1200)
+  --worktree         Run in a new git worktree under ~/.agents/worktrees/
+  --install          Symlink this script to ~/.local/bin/agent-run
+  -h, --help         Show help
+EOF
+}
+
+die() {
+  echo "agent-run: $*" >&2
+  exit 1
+}
+
+have() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+repo_basename() {
+  local dir="$1"
+  if git -C "$dir" rev-parse --show-toplevel >/dev/null 2>&1; then
+    basename "$(git -C "$dir" rev-parse --show-toplevel)"
+  else
+    basename "$(cd "$dir" && pwd)"
+  fi
+}
+
+default_cwd() {
+  if git rev-parse --show-toplevel >/dev/null 2>&1; then
+    git rev-parse --show-toplevel
+  else
+    pwd
+  fi
+}
+
+stamp() {
+  date +%Y%m%d-%H%M%S
+}
+
+run_with_timeout() {
+  local seconds="$1"
+  shift
+  python3 "$SCRIPT_DIR/run-with-timeout.py" "$seconds" "$@"
+}
+
+install_self() {
+  mkdir -p "$(dirname "$INSTALL_TARGET")"
+  [[ ! -e "$INSTALL_TARGET" && ! -L "$INSTALL_TARGET" ]] || die "install target already exists: $INSTALL_TARGET"
+  ln -s "$SCRIPT_DIR/agent-run" "$INSTALL_TARGET"
+  echo "Installed $INSTALL_TARGET -> $SCRIPT_DIR/agent-run"
+}
+
+init_task() {
+  local slug="$1"
+  local cwd="$2"
+  [[ "$slug" =~ ^[A-Za-z0-9._-]+$ ]] || die "slug must be letters, digits, dot, underscore, or hyphen"
+  [[ -f "$TEMPLATE" ]] || die "missing template: $TEMPLATE"
+  local repo
+  repo="$(repo_basename "$cwd")"
+  local dir="$AGENTS_HOME/tasks/$repo"
+  mkdir -p "$dir"
+  local path="$dir/TASK-$(stamp)-$slug.md"
+  [[ ! -e "$path" ]] || die "already exists: $path"
+  cp "$TEMPLATE" "$path"
+  echo "$path"
+}
+
+make_worktree() {
+  local cwd="$1"
+  local slug="$2"
+  git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "--worktree requires a git checkout"
+  local root
+  root="$(git -C "$cwd" rev-parse --show-toplevel)"
+  local repo
+  repo="$(basename "$root")"
+  [[ -z "$(git -C "$root" status --porcelain --untracked-files=all)" ]] || die "--worktree requires a clean checkout; use serial execution in the current checkout for uncommitted context"
+  local id="$repo-$(basename "$RUN_DIR")"
+  local path="$AGENTS_HOME/worktrees/$id"
+  mkdir -p "$AGENTS_HOME/worktrees"
+  git -C "$root" worktree add -b "agent/$id" "$path" HEAD >&2
+  echo "$path"
+}
+
+write_prompt() {
+  local task_file="$1"
+  local dest="$2"
+  {
+    printf '%s\n\n' "$WORKER_CONTRACT"
+    cat "$task_file"
+  } >"$dest"
+}
+
+invoke_worker() {
+  local worker="$1"
+  local cwd="$2"
+  local prompt_file="$3"
+  local out_file="$4"
+  local err_file="$5"
+  local worker_rule="You are an implementation worker. Do not re-delegate. Do not invoke orchestrate. Do not call agent-run. Complete only the assigned task."
+
+  case "$worker" in
+    claude)
+      run_with_timeout "$TIMEOUT" claude \
+        --print \
+        --permission-mode dontAsk \
+        --output-format text \
+        --append-system-prompt "$worker_rule" \
+        "$(cat "$prompt_file")"
+      ;;
+    agy)
+      run_with_timeout "$TIMEOUT" agy \
+        --print \
+        --sandbox \
+        --output-format text \
+        "$(cat "$prompt_file")"
+      ;;
+    grok)
+      run_with_timeout "$TIMEOUT" grok \
+        --permission-mode dontAsk \
+        --cwd "$cwd" \
+        --prompt-file "$prompt_file" \
+        --rules "$worker_rule" \
+        --output-format plain
+      ;;
+    codex)
+      run_with_timeout "$TIMEOUT" codex exec \
+        --cd "$cwd" \
+        --sandbox workspace-write \
+        - <"$prompt_file"
+      ;;
+    *)
+      die "unknown worker: $worker (claude, agy, grok, codex)"
+      ;;
+  esac >"$out_file" 2>"$err_file"
+}
+
+write_report() {
+  local report="$1"
+  local worker="$2"
+  local task_file="$3"
+  local cwd="$4"
+  local worktree="$5"
+  local status="$6"
+  local out_file="$7"
+  local err_file="$8"
+  local started="$9"
+  local ended="${10}"
+
+  {
+    echo "worker: $worker"
+    echo "exit_code: $status (process result, not acceptance)"
+    echo "task: $task_file"
+    echo "cwd: $cwd"
+    echo "worktree: ${worktree:-none}"
+    echo "started: $started"
+    echo "ended: $ended"
+    echo
+    echo "=== git status ==="
+    git -C "$cwd" status --short || true
+    echo
+    echo "snapshots: $RUN_DIR/before and $RUN_DIR/after"
+    echo "Review both staged and unstaged patches, untracked manifests and their files; compare with before."
+    echo "=== git diff --stat HEAD (tracked files) ==="
+    git -C "$cwd" diff HEAD --stat || true
+    echo
+    echo "=== worker stdout ==="
+    cat "$out_file"
+    if [[ -s "$err_file" ]]; then
+      echo
+      echo "=== worker stderr ==="
+      cat "$err_file"
+    fi
+  } >"$report"
+}
+
+WORKER=""
+TASK_FILE=""
+INIT_SLUG=""
+CWD=""
+TIMEOUT="$DEFAULT_TIMEOUT"
+USE_WORKTREE=0
+DO_INSTALL=0
+
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 1
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --install)
+      DO_INSTALL=1
+      shift
+      ;;
+    init-task)
+      shift
+      [[ $# -ge 1 ]] || die "init-task requires a slug"
+      INIT_SLUG="$1"
+      shift
+      ;;
+    --cwd)
+      shift
+      [[ $# -ge 1 ]] || die "--cwd requires a directory"
+      CWD="$1"
+      shift
+      ;;
+    --timeout)
+      shift
+      [[ $# -ge 1 ]] || die "--timeout requires seconds"
+      TIMEOUT="$1"
+      shift
+      ;;
+    --worktree)
+      USE_WORKTREE=1
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      die "unknown option: $1"
+      ;;
+    *)
+      if [[ -z "$WORKER" && -z "$INIT_SLUG" ]]; then
+        WORKER="$1"
+      elif [[ -z "$TASK_FILE" && -z "$INIT_SLUG" ]]; then
+        TASK_FILE="$1"
+      else
+        die "unexpected argument: $1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ "$DO_INSTALL" -eq 1 ]]; then
+  install_self
+  exit 0
+fi
+
+if [[ -n "$INIT_SLUG" ]]; then
+  [[ -z "$WORKER" && -z "$TASK_FILE" ]] || die "init-task does not take a worker or task file"
+  init_task "$INIT_SLUG" "${CWD:-$(default_cwd)}"
+  exit 0
+fi
+
+[[ -n "$WORKER" ]] || die "worker is required"
+case "$WORKER" in
+  claude|agy|grok|codex) ;;
+  *) die "unknown worker: $WORKER (claude, agy, grok, codex)" ;;
+esac
+have python3 || die "python3 is required for reliable timeout and snapshots"
+have "$WORKER" || die "$WORKER is not on PATH"
+[[ -n "$TASK_FILE" ]] || die "task file is required"
+[[ -f "$TASK_FILE" ]] || die "task file not found: $TASK_FILE"
+TASK_FILE="$(cd "$(dirname "$TASK_FILE")" && pwd)/$(basename "$TASK_FILE")"
+
+CWD="${CWD:-$(default_cwd)}"
+CWD="$(cd "$CWD" && pwd)"
+[[ "$TIMEOUT" =~ ^[0-9]+$ && "$TIMEOUT" -gt 0 ]] || die "--timeout must be a positive integer"
+
+mkdir -p "$AGENTS_HOME/runs"
+RUN_DIR="$(mktemp -d "$AGENTS_HOME/runs/$(stamp)-$WORKER-XXXXXXXX")"
+SLUG="$(basename "$TASK_FILE" .md)"
+WORKTREE_PATH=""
+if [[ "$USE_WORKTREE" -eq 1 ]]; then
+  WORKTREE_PATH="$(make_worktree "$CWD" "$SLUG")"
+  CWD="$WORKTREE_PATH"
+fi
+
+PROMPT_FILE="$RUN_DIR/prompt.md"
+OUT_FILE="$RUN_DIR/stdout.txt"
+ERR_FILE="$RUN_DIR/stderr.txt"
+REPORT_FILE="$RUN_DIR/report.md"
+STATUS_FILE="$RUN_DIR/status"
+
+write_prompt "$TASK_FILE" "$PROMPT_FILE"
+python3 "$SCRIPT_DIR/snapshot.py" "$CWD" "$RUN_DIR/before"
+STARTED="$(date +%Y-%m-%dT%H:%M:%S%z)"
+set +e
+(
+  cd "$CWD" || exit 1
+  invoke_worker "$WORKER" "$CWD" "$PROMPT_FILE" "$OUT_FILE" "$ERR_FILE"
+)
+STATUS=$?
+set -e
+ENDED="$(date +%Y-%m-%dT%H:%M:%S%z)"
+echo "$STATUS" >"$STATUS_FILE"
+python3 "$SCRIPT_DIR/snapshot.py" "$CWD" "$RUN_DIR/after"
+write_report "$REPORT_FILE" "$WORKER" "$TASK_FILE" "$CWD" "$WORKTREE_PATH" "$STATUS" "$OUT_FILE" "$ERR_FILE" "$STARTED" "$ENDED"
+
+echo "run: $RUN_DIR"
+echo "report: $REPORT_FILE"
+echo "status: $STATUS"
+if [[ -n "$WORKTREE_PATH" ]]; then
+  echo "worktree: $WORKTREE_PATH"
+fi
+cat "$REPORT_FILE"
+exit "$STATUS"

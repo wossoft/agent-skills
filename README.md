@@ -8,6 +8,7 @@ Wossoft 内部 Agent Skills 与 Codex Plugins 发布仓库。
 | --- | --- |
 | [abp-ddd-module-designer](skills/abp-ddd-module-designer/SKILL.md) | ABP DDD 业务模块设计、审查、重构与代码骨架生成。 |
 | [seo-content-architect](skills/seo-content-architect/SKILL.md) | 在 UI 设计与开发前，完成基于真实 SERP 的网站身份、内容架构、页面规划与内部链接设计。 |
+| [orchestrate](skills/orchestrate/SKILL.md) | 按需委派边界清楚的实现任务，默认串行，由当前会话负责审查、集成和验收。 |
 
 ## 安装
 
@@ -34,6 +35,18 @@ npx skills add git@gitlab.com:wossoft/agent-skills.git \
 ```
 
 Skill 将安装到 `~/.codex/skills/<skill-name>`。私有仓库需要本机已配置 GitLab SSH 访问权限。安装后重新开启 Codex 会话即可使用。
+
+安装 `orchestrate`：
+
+```bash
+npx skills add git@gitlab.com:wossoft/agent-skills.git \
+  --skill orchestrate \
+  --agent codex \
+  --global \
+  --yes
+```
+
+按需派工、`agent-run` 的安装及旧版身份规则迁移说明见 [skills/orchestrate/README.md](skills/orchestrate/README.md)。
 
 如需先查看仓库中可安装的 Skills：
 
