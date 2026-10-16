@@ -9,6 +9,7 @@ Wossoft 内部 Agent Skills 与 Codex Plugins 发布仓库。
 | [abp-ddd-module-designer](skills/abp-ddd-module-designer/SKILL.md) | ABP DDD 业务模块设计、审查、重构与代码骨架生成。 |
 | [seo-content-architect](skills/seo-content-architect/SKILL.md) | 在 UI 设计与开发前，完成基于真实 SERP 的网站身份、内容架构、页面规划与内部链接设计。 |
 | [orchestrate](skills/orchestrate/SKILL.md) | 按需委派边界清楚的实现任务，默认串行，由当前会话负责审查、集成和验收。 |
+| [page-blueprint](skills/page-blueprint/SKILL.md) | 新页面从 0 到 1 时，用目录 + Markdown/YAML 描述页面布局、跳转与弹层（组件直接使用 shadcn/ui 等组件库名称）；已有页面的迭代直接改代码。 |
 
 ## 安装
 
@@ -47,6 +48,18 @@ npx skills add git@gitlab.com:wossoft/agent-skills.git \
 ```
 
 按需派工、`agent-run` 的安装及旧版身份规则迁移说明见 [skills/orchestrate/README.md](skills/orchestrate/README.md)。
+
+安装 `page-blueprint`：
+
+```bash
+npx skills add git@gitlab.com:wossoft/agent-skills.git \
+  --skill page-blueprint \
+  --agent codex \
+  --global \
+  --yes
+```
+
+格式示例见 [skills/page-blueprint/references/example/](skills/page-blueprint/references/example/)。
 
 如需先查看仓库中可安装的 Skills：
 
