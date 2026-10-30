@@ -1,37 +1,27 @@
-# TASK
+# 任务
 
-## Goal and context
+## 目标与背景
 
-State the required outcome and only the background needed to implement it.
+要达成的结果，以及实现所需的最少背景。
 
-## Scope and contracts
+## 范围与约定
 
-List allowed files/modules, relevant interfaces, and explicit exclusions.
+允许修改的文件或模块、相关接口与契约、明确排除的内容。
 
-## Instructions and authority
+## 规则与限制
 
-- Identify applicable repository instructions and user constraints; include important rules that this CLI may not automatically load.
-- Preserve existing user changes; list those relevant to this task.
-- Do not commit, push, publish, delete user data, or edit global configuration unless explicitly authorized below.
-- Do not delegate or bypass permission controls. Report blockers.
-- Record any additional authorization actually granted for this task.
+- 适用的仓库规则和用户约束（worker 不一定会自动加载，重要的写在这里）。
+- 与本任务相关的已有改动或上下文（worktree 基于 HEAD，看不到未提交改动）。
+- 额外授权（默认不提交、不推送、不发布、不删数据、不改全局配置）。
 
-## Acceptance criteria
+## 验收标准
 
-List observable results that the host can verify.
+主 agent 可以核验的可观察结果。
 
-## Verification
+## 验证
 
-List exact commands and expected evidence appropriate to this change, plus checks
-explicitly prohibited or unavailable. Include worktree setup if applicable.
+需要执行的检查命令及预期结果；明确不执行或无法执行的检查。
 
-## Revision context (when applicable)
+## 修订上下文（仅修订时）
 
-Include the original task, acceptance criteria, focused feedback, prior run artifact
-paths, and existing checkout path. Each invocation is a fresh conversation.
-
-## Output
-
-Return implementation summary, changed files, checks performed and their outcomes,
-blockers, partial work, and risks requiring reviewer attention. Do not claim runtime
-or visual acceptance from static checks alone.
+上次运行目录、上次的验收意见，以及需要修复的问题清单。

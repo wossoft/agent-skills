@@ -1,354 +1,262 @@
 #!/usr/bin/env bash
-# 把 TASK 文件派给 headless worker CLI，并收回摘要与 diff。
-set -euo pipefail
+# agent-run：统一派发 codex / claude / cc-api / grok / agy，留存过程与结果，供主 agent 验收。
+set -uo pipefail
 
-resolve_script() {
-  local source="${BASH_SOURCE[0]}"
-  while [[ -L "$source" ]]; do
-    local link
-    link="$(readlink "$source")"
-    if [[ "$link" == /* ]]; then
-      source="$link"
-    else
-      source="$(cd "$(dirname "$source")" && pwd)/$link"
-    fi
-  done
-  cd "$(dirname "$source")" && pwd
-}
-
-SCRIPT_DIR="$(resolve_script)"
-SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-TEMPLATE="$SKILL_DIR/references/task-template.md"
-AGENTS_HOME="${AGENT_RUN_HOME:-$HOME/.agents}"
-DEFAULT_TIMEOUT="${AGENT_RUN_TIMEOUT:-1200}"
+RUNS_HOME="${AGENT_RUN_HOME:-$HOME/.agent-runs}"
+CONFIG="${AGENT_RUN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/agent-run/config}"
 INSTALL_TARGET="${AGENT_RUN_INSTALL:-$HOME/.local/bin/agent-run}"
+AGENTS="codex claude cc-api grok agy"
 
-WORKER_CONTRACT='You are an implementation worker for a single assigned task.
+resolve_script_dir() {
+  local src="${BASH_SOURCE[0]}" link
+  while [ -L "$src" ]; do
+    link=$(readlink "$src")
+    case $link in /*) src=$link ;; *) src="$(cd "$(dirname "$src")" && pwd)/$link" ;; esac
+  done
+  cd "$(dirname "$src")" && pwd
+}
+SCRIPT_DIR=$(resolve_script_dir)
+TEMPLATE="$SCRIPT_DIR/../references/task-template.md"
 
-Complete only the task below. Do not re-delegate. Do not invoke orchestrate. Do not call agent-run.
-
-Follow applicable repository instructions and the authorization boundaries in the task.
-Preserve existing user changes. Do not commit, push, publish, delete user data, or change global configuration unless the task explicitly authorizes it.
-Stay inside Scope. Run the named verification. If blocked by permissions or missing context, report the blocker; do not bypass controls.
-
-When finished, return:
-1. implementation summary
-2. changed files
-3. checks performed
-4. failed checks, if any
-5. known risks
-6. anything requiring reviewer attention'
+# 默认难度表：只给思考等级，模型用各 CLI 默认值；个人模型映射写在 $CONFIG 中覆盖。
+# 格式 TIER_<agent>_<tier>="<模型|-> <思考等级|->"，agent 名中的 - 写成 _
+TIER_codex_hard="- xhigh";  TIER_codex_complex="- high";  TIER_codex_simple="- medium";  TIER_codex_cu="- xhigh"
+TIER_claude_hard="- max";   TIER_claude_complex="- high"; TIER_claude_simple="- -";      TIER_claude_cu="- high"
+TIER_cc_api_hard="- max";   TIER_cc_api_complex="- high"; TIER_cc_api_simple="- -";      TIER_cc_api_cu="- high"
+TIER_grok_hard="- high";    TIER_grok_complex="- high";   TIER_grok_simple="- -";        TIER_grok_cu="- high"
+DEFAULT_TIER_cc_api=simple
+CC_API_CONFIG_DIR="$HOME/.claude-api"
+# shellcheck source=/dev/null
+[ -f "$CONFIG" ] && . "$CONFIG"
 
 usage() {
-  cat <<'EOF'
-Usage:
-  agent-run <worker> <task-file> [options]
-  agent-run init-task <slug> [options]
-  agent-run --install
+  cat <<EOF
+用法:
+  agent-run <$(echo "$AGENTS" | tr ' ' '|')> <任务名> <提示词文件> [选项]
+  agent-run ls [仓库路径]     列出该仓库的派发记录与状态
+  agent-run template          输出任务书模板
+  agent-run --install         把本脚本软链到 $INSTALL_TARGET
 
-Workers: claude, agy, grok, codex
+选项:
+  --mode build|plan   build=可写（默认，在独立 worktree 中运行并跳过权限确认）；plan=只读（在原目录运行）
+  --repo <路径>       目标仓库，默认当前目录
+  --in-place          build 模式直接在原工作区运行，保留权限控制（会和未提交改动混在一起）
+  --timeout <秒>      超时，默认 1800
+  --check "<命令>"    完成后在工作目录执行的检查命令，如 "pnpm -C apps/web typecheck"
+  --tier <难度>       hard | complex | simple | cu（computer use），默认 complex（cc-api 默认 simple）
+  --model <模型>      手动指定模型，覆盖 --tier
+  --effort <等级>     手动指定思考等级，覆盖 --tier；cc-api 只支持 low|high|max；agy 不支持
 
-Options:
-  --cwd DIR          Working directory (default: current git root, else pwd)
-  --timeout SECONDS  Kill the worker after N seconds (default: 1200)
-  --worktree         Run in a new git worktree under ~/.agents/worktrees/
-  --install          Symlink this script to ~/.local/bin/agent-run
-  -h, --help         Show help
+难度映射: 脚本内置默认值，可在 $CONFIG 中覆盖，
+  例如 TIER_codex_hard="gpt-6-astra medium"；CC_API_CONFIG_DIR 指定 cc-api 的 Claude 配置目录。
+  agy 的模型固定为其默认设置（--model 不可靠）。
+
+产物目录: ~/.agent-runs/<仓库名>/<任务名>/
+  prompt.md      实际发送的提示词（含汇报约定）
+  events.jsonl   过程事件流
+  final.md       agent 的最终汇报
+  status         running / done / failed / timeout
+  changes.txt    改动文件列表；patch.diff 完整补丁（仅 worktree）
+  check.log      --check 输出
+退出码: 0 完成，1 失败，124 超时，2 参数错误
 EOF
 }
 
-die() {
-  echo "agent-run: $*" >&2
-  exit 1
-}
+die() { echo "agent-run: $*" >&2; exit 2; }
 
-have() {
-  command -v "$1" >/dev/null 2>&1
-}
+case ${1:-} in
+  -h|--help|"") usage; exit 0 ;;
+  template) cat "$TEMPLATE"; exit 0 ;;
+  --install)
+    [ -e "$INSTALL_TARGET" ] || [ -L "$INSTALL_TARGET" ] && die "目标已存在: ${INSTALL_TARGET}（确认后自行移走再安装）"
+    mkdir -p "$(dirname "$INSTALL_TARGET")"
+    ln -s "$SCRIPT_DIR/agent-run" "$INSTALL_TARGET"
+    echo "已安装 $INSTALL_TARGET -> $SCRIPT_DIR/agent-run"
+    exit 0 ;;
+  ls)
+    root=$(git -C "${2:-$PWD}" rev-parse --show-toplevel 2>/dev/null) || die "不是 git 仓库"
+    dir="$RUNS_HOME/$(basename "$root")"
+    [ -d "$dir" ] || { echo "暂无记录"; exit 0; }
+    for d in "$dir"/*/; do
+      n=$(basename "$d")
+      printf '%-32s %-8s %-48s %s\n' "$n" "$(cat "$d/agent" 2>/dev/null)" "$(cat "$d/model" 2>/dev/null)" "$(head -1 "$d/status" 2>/dev/null)"
+    done
+    exit 0 ;;
+esac
 
-repo_basename() {
-  local dir="$1"
-  if git -C "$dir" rev-parse --show-toplevel >/dev/null 2>&1; then
-    basename "$(git -C "$dir" rev-parse --show-toplevel)"
-  else
-    basename "$(cd "$dir" && pwd)"
-  fi
-}
+# worker 内部再次调用视为递归派发，直接拒绝
+[ -n "${AGENT_RUN_WORKER:-}" ] && die "当前处于 agent-run 派发的 worker 中，禁止再次派发"
 
-default_cwd() {
-  if git rev-parse --show-toplevel >/dev/null 2>&1; then
-    git rev-parse --show-toplevel
-  else
-    pwd
-  fi
-}
-
-stamp() {
-  date +%Y%m%d-%H%M%S
-}
-
-run_with_timeout() {
-  local seconds="$1"
-  shift
-  python3 "$SCRIPT_DIR/run-with-timeout.py" "$seconds" "$@"
-}
-
-install_self() {
-  mkdir -p "$(dirname "$INSTALL_TARGET")"
-  [[ ! -e "$INSTALL_TARGET" && ! -L "$INSTALL_TARGET" ]] || die "install target already exists: $INSTALL_TARGET"
-  ln -s "$SCRIPT_DIR/agent-run" "$INSTALL_TARGET"
-  echo "Installed $INSTALL_TARGET -> $SCRIPT_DIR/agent-run"
-}
-
-init_task() {
-  local slug="$1"
-  local cwd="$2"
-  [[ "$slug" =~ ^[A-Za-z0-9._-]+$ ]] || die "slug must be letters, digits, dot, underscore, or hyphen"
-  [[ -f "$TEMPLATE" ]] || die "missing template: $TEMPLATE"
-  local repo
-  repo="$(repo_basename "$cwd")"
-  local dir="$AGENTS_HOME/tasks/$repo"
-  mkdir -p "$dir"
-  local path="$dir/TASK-$(stamp)-$slug.md"
-  [[ ! -e "$path" ]] || die "already exists: $path"
-  cp "$TEMPLATE" "$path"
-  echo "$path"
-}
-
-make_worktree() {
-  local cwd="$1"
-  local slug="$2"
-  git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "--worktree requires a git checkout"
-  local root
-  root="$(git -C "$cwd" rev-parse --show-toplevel)"
-  local repo
-  repo="$(basename "$root")"
-  [[ -z "$(git -C "$root" status --porcelain --untracked-files=all)" ]] || die "--worktree requires a clean checkout; use serial execution in the current checkout for uncommitted context"
-  local id="$repo-$(basename "$RUN_DIR")"
-  local path="$AGENTS_HOME/worktrees/$id"
-  mkdir -p "$AGENTS_HOME/worktrees"
-  git -C "$root" worktree add -b "agent/$id" "$path" HEAD >&2
-  echo "$path"
-}
-
-write_prompt() {
-  local task_file="$1"
-  local dest="$2"
-  {
-    printf '%s\n\n' "$WORKER_CONTRACT"
-    cat "$task_file"
-  } >"$dest"
-}
-
-invoke_worker() {
-  local worker="$1"
-  local cwd="$2"
-  local prompt_file="$3"
-  local out_file="$4"
-  local err_file="$5"
-  local worker_rule="You are an implementation worker. Do not re-delegate. Do not invoke orchestrate. Do not call agent-run. Complete only the assigned task."
-
-  case "$worker" in
-    claude)
-      run_with_timeout "$TIMEOUT" claude \
-        --print \
-        --permission-mode dontAsk \
-        --output-format text \
-        --append-system-prompt "$worker_rule" \
-        "$(cat "$prompt_file")"
-      ;;
-    agy)
-      run_with_timeout "$TIMEOUT" agy \
-        --print \
-        --sandbox \
-        --output-format text \
-        "$(cat "$prompt_file")"
-      ;;
-    grok)
-      run_with_timeout "$TIMEOUT" grok \
-        --permission-mode dontAsk \
-        --cwd "$cwd" \
-        --prompt-file "$prompt_file" \
-        --rules "$worker_rule" \
-        --output-format plain
-      ;;
-    codex)
-      run_with_timeout "$TIMEOUT" codex exec \
-        --cd "$cwd" \
-        --sandbox workspace-write \
-        - <"$prompt_file"
-      ;;
-    *)
-      die "unknown worker: $worker (claude, agy, grok, codex)"
-      ;;
-  esac >"$out_file" 2>"$err_file"
-}
-
-write_report() {
-  local report="$1"
-  local worker="$2"
-  local task_file="$3"
-  local cwd="$4"
-  local worktree="$5"
-  local status="$6"
-  local out_file="$7"
-  local err_file="$8"
-  local started="$9"
-  local ended="${10}"
-
-  {
-    echo "worker: $worker"
-    echo "exit_code: $status (process result, not acceptance)"
-    echo "task: $task_file"
-    echo "cwd: $cwd"
-    echo "worktree: ${worktree:-none}"
-    echo "started: $started"
-    echo "ended: $ended"
-    echo
-    echo "=== git status ==="
-    git -C "$cwd" status --short || true
-    echo
-    echo "snapshots: $RUN_DIR/before and $RUN_DIR/after"
-    echo "Review both staged and unstaged patches, untracked manifests and their files; compare with before."
-    echo "=== git diff --stat HEAD (tracked files) ==="
-    git -C "$cwd" diff HEAD --stat || true
-    echo
-    echo "=== worker stdout ==="
-    cat "$out_file"
-    if [[ -s "$err_file" ]]; then
-      echo
-      echo "=== worker stderr ==="
-      cat "$err_file"
-    fi
-  } >"$report"
-}
-
-WORKER=""
-TASK_FILE=""
-INIT_SLUG=""
-CWD=""
-TIMEOUT="$DEFAULT_TIMEOUT"
-USE_WORKTREE=0
-DO_INSTALL=0
-
-if [[ $# -eq 0 ]]; then
-  usage
-  exit 1
-fi
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    --install)
-      DO_INSTALL=1
-      shift
-      ;;
-    init-task)
-      shift
-      [[ $# -ge 1 ]] || die "init-task requires a slug"
-      INIT_SLUG="$1"
-      shift
-      ;;
-    --cwd)
-      shift
-      [[ $# -ge 1 ]] || die "--cwd requires a directory"
-      CWD="$1"
-      shift
-      ;;
-    --timeout)
-      shift
-      [[ $# -ge 1 ]] || die "--timeout requires seconds"
-      TIMEOUT="$1"
-      shift
-      ;;
-    --worktree)
-      USE_WORKTREE=1
-      shift
-      ;;
-    --)
-      shift
-      break
-      ;;
-    -*)
-      die "unknown option: $1"
-      ;;
-    *)
-      if [[ -z "$WORKER" && -z "$INIT_SLUG" ]]; then
-        WORKER="$1"
-      elif [[ -z "$TASK_FILE" && -z "$INIT_SLUG" ]]; then
-        TASK_FILE="$1"
-      else
-        die "unexpected argument: $1"
-      fi
-      shift
-      ;;
+[ $# -ge 3 ] || { usage; exit 2; }
+AGENT=$1 NAME=$2 PROMPT_FILE=$3; shift 3
+MODE=build TIMEOUT=1800 REPO=$PWD IN_PLACE=0 CHECK="" TIER="" MODEL="" EFFORT=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --mode) MODE=$2; shift 2 ;;
+    --timeout) TIMEOUT=$2; shift 2 ;;
+    --repo) REPO=$2; shift 2 ;;
+    --in-place) IN_PLACE=1; shift ;;
+    --check) CHECK=$2; shift 2 ;;
+    --tier) TIER=$2; shift 2 ;;
+    --model) MODEL=$2; shift 2 ;;
+    --effort) EFFORT=$2; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "未知参数: $1" ;;
   esac
 done
 
-if [[ "$DO_INSTALL" -eq 1 ]]; then
-  install_self
-  exit 0
-fi
-
-if [[ -n "$INIT_SLUG" ]]; then
-  [[ -z "$WORKER" && -z "$TASK_FILE" ]] || die "init-task does not take a worker or task file"
-  init_task "$INIT_SLUG" "${CWD:-$(default_cwd)}"
-  exit 0
-fi
-
-[[ -n "$WORKER" ]] || die "worker is required"
-case "$WORKER" in
-  claude|agy|grok|codex) ;;
-  *) die "unknown worker: $WORKER (claude, agy, grok, codex)" ;;
+case " $AGENTS " in *" $AGENT "*) ;; *) die "不支持的 agent: ${AGENT}（可选: $AGENTS）" ;; esac
+case $TIER in ""|hard|complex|simple|cu) ;; *) die "--tier 只能是 hard、complex、simple 或 cu" ;; esac
+KEY=${AGENT//-/_}
+DEFAULT_TIER_VAR="DEFAULT_TIER_$KEY"
+TIER=${TIER:-${!DEFAULT_TIER_VAR:-complex}}
+case $AGENT in
+  agy) [ -n "$MODEL$EFFORT" ] && die "agy 不支持 --model / --effort，请在 agy 自身设置中修改默认模型" ;;
+  # GLM 只有 low / high / max 三档
+  cc-api) case $EFFORT in ""|low|high|max) ;; *) die "cc-api 的 --effort 只能是 low、high 或 max" ;; esac ;;
 esac
-have python3 || die "python3 is required for reliable timeout and snapshots"
-have "$WORKER" || die "$WORKER is not on PATH"
-[[ -n "$TASK_FILE" ]] || die "task file is required"
-[[ -f "$TASK_FILE" ]] || die "task file not found: $TASK_FILE"
-TASK_FILE="$(cd "$(dirname "$TASK_FILE")" && pwd)/$(basename "$TASK_FILE")"
 
-CWD="${CWD:-$(default_cwd)}"
-CWD="$(cd "$CWD" && pwd)"
-[[ "$TIMEOUT" =~ ^[0-9]+$ && "$TIMEOUT" -gt 0 ]] || die "--timeout must be a positive integer"
+# 难度 -> 模型与思考等级；手动 --model / --effort 优先
+TIER_VAR="TIER_${KEY}_$TIER"
+read -r TIER_MODEL TIER_EFFORT <<< "${!TIER_VAR:-- -}"
+[ "$TIER_MODEL" = - ] && TIER_MODEL=""
+[ "${TIER_EFFORT:--}" = - ] && TIER_EFFORT=""
+MODEL=${MODEL:-$TIER_MODEL} EFFORT=${EFFORT:-$TIER_EFFORT}
+case $MODE in build|plan) ;; *) die "--mode 只能是 build 或 plan" ;; esac
+[[ $NAME =~ ^[a-z0-9][a-z0-9._-]*$ ]] || die "任务名只能用小写字母、数字、. _ -"
+[[ $TIMEOUT =~ ^[0-9]+$ ]] || die "--timeout 必须是秒数"
+[ -f "$PROMPT_FILE" ] || die "提示词文件不存在: $PROMPT_FILE"
+BIN=$AGENT; [ "$AGENT" = cc-api ] && BIN=claude
+command -v "$BIN" >/dev/null || die "找不到命令: $BIN"
 
-mkdir -p "$AGENTS_HOME/runs"
-RUN_DIR="$(mktemp -d "$AGENTS_HOME/runs/$(stamp)-$WORKER-XXXXXXXX")"
-SLUG="$(basename "$TASK_FILE" .md)"
-WORKTREE_PATH=""
-if [[ "$USE_WORKTREE" -eq 1 ]]; then
-  WORKTREE_PATH="$(make_worktree "$CWD" "$SLUG")"
-  CWD="$WORKTREE_PATH"
+ROOT=$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null) || die "不是 git 仓库: $REPO"
+RUN="$RUNS_HOME/$(basename "$ROOT")/$NAME"
+[ -e "$RUN" ] && die "任务名已存在: ${RUN}（换个名字，或先删除旧记录）"
+mkdir -p "$RUN"
+echo "$AGENT" > "$RUN/agent"
+echo "tier=$TIER model=${MODEL:-默认} effort=${EFFORT:-默认}" > "$RUN/model"
+
+# 工作目录：build 默认独立 worktree，基于 HEAD，不含主工作区未提交改动
+WD=$ROOT ISOLATED=0
+if [ "$MODE" = build ] && [ "$IN_PLACE" = 0 ]; then
+  WD="$(dirname "$ROOT")/$(basename "$ROOT")-wt/$NAME"
+  if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
+    echo "agent-run: 注意，主工作区有未提交改动，worktree 基于 HEAD，看不到这些改动" >&2
+  fi
+  git -C "$ROOT" worktree add -q -b "agent/$NAME" "$WD" HEAD || die "创建 worktree 失败"
+  ISOLATED=1
+fi
+echo "$WD" > "$RUN/workdir"
+BASE=$(git -C "$WD" rev-parse HEAD)
+BEFORE=$(git -C "$WD" status --porcelain)
+
+# 提示词 = 任务 + 统一汇报约定
+{
+  cat "$PROMPT_FILE"
+  printf '\n\n---\n'
+  echo "你是被派发的 worker：只完成本任务，不要再派发给其他 agent，不要调用 agent-run 或 orchestrate。"
+  if [ "$MODE" = plan ]; then
+    echo "这是只读任务：不要修改、创建或删除任何文件。"
+  else
+    echo "工作目录：${WD}。只修改任务范围内的文件。"
+  fi
+  echo "禁止：git commit / push、修改任务范围外的文件；除任务明确要求外不运行单元测试。"
+  echo "最后一条回复必须使用以下结构（中文）："
+  echo "## 改动文件"
+  echo "## 做了什么"
+  echo "## 没做什么"
+  echo "## 不确定 / 风险"
+} > "$RUN/prompt.md"
+PROMPT=$(cat "$RUN/prompt.md")
+
+OPTS=()
+case $AGENT in
+  codex)
+    SANDBOX=workspace-write; [ "$MODE" = plan ] && SANDBOX=read-only
+    [ -n "$MODEL" ] && OPTS+=(-m "$MODEL"); [ -n "$EFFORT" ] && OPTS+=(-c "model_reasoning_effort=\"$EFFORT\"")
+    CMD=(codex exec --json --skip-git-repo-check -C "$WD" -s "$SANDBOX" ${OPTS[@]+"${OPTS[@]}"} -o "$RUN/final.md" "$PROMPT") ;;
+  claude|cc-api)
+    # 只读不用 plan 模式（会调 ExitPlanMode 打乱汇报）；无头 default 模式下需授权的工具一律拒绝
+    if [ "$MODE" = plan ]; then PERM=(--permission-mode default --disallowedTools "Edit Write NotebookEdit")
+    elif [ "$ISOLATED" = 1 ]; then PERM=(--dangerously-skip-permissions)
+    else PERM=(--permission-mode acceptEdits)
+    fi
+    [ -n "$MODEL" ] && OPTS+=(--model "$MODEL"); [ -n "$EFFORT" ] && OPTS+=(--effort "$EFFORT")
+    ENVS=(); [ "$AGENT" = cc-api ] && ENVS=(CLAUDE_CONFIG_DIR="$CC_API_CONFIG_DIR")
+    CMD=(env ${ENVS[@]+"${ENVS[@]}"} claude -p "$PROMPT" --output-format stream-json --verbose "${PERM[@]}" ${OPTS[@]+"${OPTS[@]}"}) ;;
+  grok)
+    PERM=(); [ "$MODE" = plan ] && PERM=(--permission-mode plan); [ "$MODE$ISOLATED" = build1 ] && PERM=(--always-approve)
+    [ -n "$MODEL" ] && OPTS+=(-m "$MODEL"); [ -n "$EFFORT" ] && OPTS+=(--reasoning-effort "$EFFORT")
+    CMD=(grok -p "$PROMPT" --cwd "$WD" --output-format streaming-json ${PERM[@]+"${PERM[@]}"} ${OPTS[@]+"${OPTS[@]}"}) ;;
+  agy)
+    PERM=(); [ "$MODE" = plan ] && PERM=(--mode plan); [ "$MODE$ISOLATED" = build1 ] && PERM=(--dangerously-skip-permissions)
+    CMD=(agy -p "$PROMPT" --output-format stream-json ${PERM[@]+"${PERM[@]}"}) ;;
+esac
+
+echo "running pid=? started=$(date '+%F %T')" > "$RUN/status"
+START=$(date +%s)
+
+# 独立进程组运行，超时可整组终止
+set -m
+( cd "$WD" && export AGENT_RUN_WORKER=1 && exec "${CMD[@]}" ) > "$RUN/events.jsonl" 2> "$RUN/stderr.log" < /dev/null &
+PID=$!
+set +m
+echo "running pid=$PID started=$(date '+%F %T')" > "$RUN/status"
+# 看门狗被终止时一并结束内部 sleep，否则它占着输出管道，调用方要等满超时才返回
+( trap 'kill "$SP" 2>/dev/null; exit 0' TERM; sleep "$TIMEOUT" & SP=$!; wait "$SP"
+  touch "$RUN/.timeout"; kill -TERM -- "-$PID" 2>/dev/null; sleep 10; kill -KILL -- "-$PID" 2>/dev/null ) &
+WATCH=$!
+wait "$PID"; RC=$?
+kill "$WATCH" 2>/dev/null; wait "$WATCH" 2>/dev/null
+ELAPSED=$(( $(date +%s) - START ))
+
+# 提取最终汇报（codex 已由 -o 写出）
+case $AGENT in
+  grok) jq -rjs '(map(.type | test("^tool_call")) | rindex(true) // -1) as $i | .[$i+1:] | map(select(.type=="text") | .data) | join("")' "$RUN/events.jsonl" > "$RUN/final.md" 2>/dev/null ;;
+  agy) jq -r 'select(.event=="result") | .result.response' "$RUN/events.jsonl" > "$RUN/final.md" 2>/dev/null ;;
+  claude|cc-api) jq -r 'select(.type=="result") | .result // empty' "$RUN/events.jsonl" > "$RUN/final.md" 2>/dev/null ;;
+esac
+
+if [ -e "$RUN/.timeout" ]; then STATUS=timeout EXIT=124
+elif [ "$RC" -ne 0 ]; then STATUS="failed rc=$RC" EXIT=1
+elif [ ! -s "$RUN/final.md" ]; then STATUS="failed 无最终汇报" EXIT=1
+else STATUS=done EXIT=0
+fi
+rm -f "$RUN/.timeout"
+
+# 改动：worktree 中暂存全部（不提交）以得到含新文件的完整补丁；原工作区只列状态，不碰暂存区
+if [ "$ISOLATED" = 1 ]; then
+  git -C "$WD" add -A
+  git -C "$WD" diff --cached --stat "$BASE" > "$RUN/changes.txt"
+  git -C "$WD" diff --cached "$BASE" > "$RUN/patch.diff"
+  [ "$(git -C "$WD" rev-parse HEAD)" != "$BASE" ] && echo "警告：agent 擅自创建了提交" >> "$RUN/changes.txt"
+else
+  AFTER=$(git -C "$WD" status --porcelain)
+  if [ "$MODE" = plan ] && [ "$BEFORE" != "$AFTER" ]; then
+    echo "警告：只读任务改动了工作区" > "$RUN/changes.txt"
+    diff <(echo "$BEFORE") <(echo "$AFTER") >> "$RUN/changes.txt"
+  else
+    echo "$AFTER" > "$RUN/changes.txt"
+  fi
 fi
 
-PROMPT_FILE="$RUN_DIR/prompt.md"
-OUT_FILE="$RUN_DIR/stdout.txt"
-ERR_FILE="$RUN_DIR/stderr.txt"
-REPORT_FILE="$RUN_DIR/report.md"
-STATUS_FILE="$RUN_DIR/status"
-
-write_prompt "$TASK_FILE" "$PROMPT_FILE"
-python3 "$SCRIPT_DIR/snapshot.py" "$CWD" "$RUN_DIR/before"
-STARTED="$(date +%Y-%m-%dT%H:%M:%S%z)"
-set +e
-(
-  cd "$CWD" || exit 1
-  invoke_worker "$WORKER" "$CWD" "$PROMPT_FILE" "$OUT_FILE" "$ERR_FILE"
-)
-STATUS=$?
-set -e
-ENDED="$(date +%Y-%m-%dT%H:%M:%S%z)"
-echo "$STATUS" >"$STATUS_FILE"
-python3 "$SCRIPT_DIR/snapshot.py" "$CWD" "$RUN_DIR/after"
-write_report "$REPORT_FILE" "$WORKER" "$TASK_FILE" "$CWD" "$WORKTREE_PATH" "$STATUS" "$OUT_FILE" "$ERR_FILE" "$STARTED" "$ENDED"
-
-echo "run: $RUN_DIR"
-echo "report: $REPORT_FILE"
-echo "status: $STATUS"
-if [[ -n "$WORKTREE_PATH" ]]; then
-  echo "worktree: $WORKTREE_PATH"
+CHECK_RESULT=""
+if [ -n "$CHECK" ] && [ "$EXIT" = 0 ]; then
+  if (cd "$WD" && bash -c "$CHECK") > "$RUN/check.log" 2>&1; then CHECK_RESULT="check=pass"
+  else CHECK_RESULT="check=fail"
+  fi
 fi
-cat "$REPORT_FILE"
-exit "$STATUS"
+
+echo "$STATUS elapsed=${ELAPSED}s $CHECK_RESULT" > "$RUN/status"
+
+echo "== agent-run $AGENT/$NAME: $STATUS (${ELAPSED}s) $CHECK_RESULT [$(cat "$RUN/model")]"
+echo "产物: $RUN"
+[ "$ISOLATED" = 1 ] && echo "worktree: ${WD}（分支 agent/${NAME}）"
+echo "-- 改动"; cat "$RUN/changes.txt"
+echo "-- 最终汇报"; cat "$RUN/final.md" 2>/dev/null; echo
+[ "$STATUS" != done ] && { echo "-- stderr 末尾"; tail -20 "$RUN/stderr.log"; }
+if [ "$ISOLATED" = 1 ]; then
+  echo "-- 合并: git -C \"$ROOT\" apply --3way \"$RUN/patch.diff\""
+  echo "-- 清理: git -C \"$ROOT\" worktree remove --force \"$WD\" && git -C \"$ROOT\" branch -D agent/$NAME"
+fi
+exit "$EXIT"

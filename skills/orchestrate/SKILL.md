@@ -1,83 +1,92 @@
 ---
 name: orchestrate
 description: >
-  Coordinate bounded implementation tasks using task specs, optional CLI workers,
-  and host review. Use when the user requests orchestration or delegation of a
-  substantial implementation. Ordinary edits, diagnosis, and code review do not
-  require this workflow.
+  Act as the orchestrator when the main agent (Claude Code, Codex, Grok, or another
+  host) faces non-trivial work: decide what to do itself and what to dispatch to
+  other CLI agents (Codex, Claude, cc-api, Grok, Antigravity) by role and difficulty,
+  run them through agent-run, and verify results before integrating. Use for
+  implementation, refactoring, diagnosis, research, or bulk chores that can be
+  scoped and handed off, and whenever the user asks to delegate, parallelize, or get
+  a second opinion. Skip for one- or two-line edits and pure Q&A.
 ---
 
 # Orchestrate
 
-External workers require Bash, Python 3, a POSIX host, and the selected CLI on PATH.
-Worktrees require Git.
+The current main agent is the orchestrator. It owns scope, architecture decisions,
+integration, final verification, and the report. Workers are disposable: each run is
+a fresh conversation that sees only the task file.
 
-Use this workflow for the current task only. Do not install global identity rules
-or treat skill installation as authorization to dispatch every future request.
-The host owns scope, integration, and acceptance.
+## Roles
 
-## Decide whether to delegate
+Route by role first, then by availability. Defaults (see
+[references/routing.md](references/routing.md) for tiers and user overrides):
 
-Handle small edits, requirement discovery, architecture decisions, and debugging
-that depends on ongoing observations directly. Delegate when a substantial,
-bounded task can be specified without losing essential conversation context.
-Default to one task at a time; avoid making task files for work done directly.
+| Work | Default owner |
+| --- | --- |
+| Core logic, architecture decisions, UI/frontend, docs (README, technical docs, reports), integration and verification | Orchestrator itself |
+| Backend: APIs, server code, databases, migrations; any well-scoped implementation, diagnosis, or refactor that can be done independently | `codex` (first choice) |
+| Second opinion on very hard problems, deep diagnosis, architecture cross-check | `codex --tier hard` |
+| Chores: bulk mechanical edits, lookups, small scripts, version checks, file housekeeping, simple summaries | `grok` or `cc-api` (after Codex in priority) |
+| Web research, visual/design review, document and media conversion | `agy` |
+| Frontend or docs work when the orchestrator is not Claude | `claude` |
 
-Prefer native subagents when available, authorized, and sufficient for the task.
-Use an external CLI when a different product, model, or tool environment provides
-concrete value. Workers do not automatically inherit the conversation or the
-host's authorization boundaries.
+Rules that apply to every host:
 
-Choose by capability, availability, and user preference. Claude for backend work
-and agy for UI are optional starting preferences, not requirements. Codex and Grok
-can also implement tasks. Use an independent second opinion only when useful.
-If no suitable worker is available, implement on the host. Do not install tools or
-change credentials just to satisfy a routing preference.
+- Do not dispatch to your own product at the same tier just to offload work; doing
+  it yourself is cheaper. Dispatching to yourself at a different tier (for example
+  Codex host asking `codex --tier hard` for a second opinion) is fine.
+- Dispatch without asking when the task falls in a role above. Dispatch independent
+  subtasks in the same turn, each with distinct file ownership.
+- Do trivial edits directly when dispatch clearly costs more than it saves, but do
+  not use that as a reason to do everything yourself.
+- If a worker CLI is unavailable or failing, fall back to the next owner or do it
+  yourself. Do not install tools or change credentials to satisfy routing.
+- Workers never re-delegate. agent-run refuses nested calls.
 
-## Prepare a task
+## Dispatch
 
-For external workers, use this skill's `scripts/agent-run` (or a verified installed
-link). Create a spec with `agent-run init-task <slug> --cwd <repo-root>` and fill
-[references/task-template.md](references/task-template.md). Record the goal,
-allowed files, relevant repository instructions, API contracts, existing changes,
-authorization limits, acceptance criteria, and exact verification commands.
-Verification follows the user's instructions and change risk as well as repository
-rules; absence of a repository checklist does not mean no checks are needed.
+Use this skill's `scripts/agent-run` (normally linked as `~/.local/bin/agent-run`;
+`agent-run --help` for options).
 
-Inspect the current checkout before dispatch. Keep work depending on uncommitted
-changes in that checkout, serially. The runner records Git evidence before and
-after; it does not isolate ordinary execution or restore overwritten changes.
+1. Write the prompt to a file. Start from `agent-run template` (the same content as
+   [references/task-template.md](references/task-template.md)). State goal, allowed
+   files, contracts, relevant repository rules the worker may not load, prohibitions,
+   and acceptance criteria. agent-run appends the worker contract and the report
+   format (changed files / done / not done / uncertain).
+2. Pick mode and tier:
+   - Writable tasks use the default `--mode build`: an isolated worktree at HEAD with
+     permission prompts skipped. It does not see uncommitted changes; if the task
+     depends on them, describe them in the prompt or run serially with `--in-place`
+     (permission controls stay on). Never commit or stash user changes to make a
+     worktree run possible.
+   - Read-only tasks (diagnosis, review, research) use `--mode plan` in the original
+     checkout.
+   - Choose `--tier` by difficulty: `hard` very hard, `complex` default, `simple`
+     easy, `cu` computer use. Do not default to the highest tier.
+   - Add `--check "<command>"` with the project-appropriate check for the change.
+3. Run:
 
-## Execute
+   ```bash
+   agent-run codex api-pagination /path/to/prompt.md --repo /path/to/repo \
+     --tier complex --check "dotnet build src/Api"
+   ```
 
-```bash
-agent-run claude /absolute/path/TASK.md --cwd /absolute/path/repo
-agent-run agy /absolute/path/TASK.md --cwd /absolute/path/repo --timeout 1200
-```
+   For long runs use the host's background execution and watch
+   `~/.agent-runs/<repo>/<task>/events.jsonl`; intervene on errors or long silence.
+   `agent-run ls` lists runs. Exit codes: 0 done, 1 failed, 124 timeout, 2 bad args.
 
-The runner preserves permission controls; it has no permission-bypass switch.
-Permission failures are blockers to report or handle within existing authority.
-The timeout kills the worker process group and returns 124. No automatic retry:
-inspect partial changes first. A zero exit code is only a process result.
+## Accept and integrate
 
-Parallelize only independent tasks with stable interfaces and distinct file
-ownership. For concurrent CLI implementation in the same repository, use separate
-`--worktree` runs. These require a clean checkout and start at HEAD. Ignored files,
-dependencies, and local configuration are not copied; describe any necessary setup
-in the task. Do not commit or stash user changes to satisfy this prerequisite.
+Follow [references/review.md](references/review.md). Judge from `changes.txt`,
+`patch.diff`, `check.log`, and the files themselves, never from the worker's own
+summary. Exit 0 only means the process finished.
 
-## Review, revise, integrate
+- PASS: apply the patch to the main checkout, preserving user changes, run the
+  relevant checks there, then remove the worktree and branch.
+- REVISION: a new run with the full original task, focused fixes, and prior artifact
+  paths. After two failed attempts, stop redispatching; diagnose or implement on the
+  host.
+- Do not commit, push, or publish unless the user asked.
 
-Follow [references/review.md](references/review.md). Inspect actual changes and
-verification evidence before PASS. For isolated work, integrate the reviewed
-changes and verify the resulting target checkout before declaring completion.
-
-Every CLI invocation starts a fresh conversation. A revision task must include the
-original task and acceptance criteria, focused feedback, previous run artifacts,
-and the existing execution directory. Use `--cwd <previous-worktree>` without
-`--worktree` to revise in place. After two unsuccessful attempts, stop redispatching
-and diagnose or implement on the host; ask only for a necessary user decision or
-new authority.
-
-Report the outcome, meaningful checks, unresolved risks, and any work still waiting
-for integration. Mention executor details only when they help explain the result.
+Report the outcome, the checks actually run, unverified runtime/browser/device
+behavior, remaining risks, and which parts each agent did.

@@ -1,53 +1,62 @@
 # orchestrate
 
-按需把边界清楚、工作量足够大的实现交给 worker，由当前会话负责范围、审查和验收。
-默认串行；小改动、需求探索和依赖连续观察的调试直接完成。无需安装全局身份规则。
+让任意主 agent（Claude Code、Codex、Grok 等）作为调度者：按职责和难度把任务派给其他
+CLI agent（codex、claude、cc-api、grok、agy），再由主 agent 验收、集成。分工规则、派发流程
+和验收要求都在 skill 里，全局规则只需要一行指针。
 
 ## 安装
 
 ```bash
-npx skills add git@gitlab.com:wossoft/agent-skills.git \
-  --skill orchestrate --agent codex --global --yes
+npx skills add wossoft/agent-skills --skill orchestrate --agent codex --global --yes
 ```
 
-其他宿主使用其支持的 skill 安装方式。执行脚本需要 Bash、Python 3、POSIX 环境，
-以及选定的 `claude`、`agy`、`grok` 或 `codex` CLI。使用哪个 worker 由能力、可用性和
-用户偏好决定；没有适合的 worker 时由当前会话完成。
+其他宿主按各自方式安装 skill。脚本依赖 Bash、Git、`jq` 和所选 worker 的 CLI。
 
-可直接调用安装目录的 `scripts/agent-run`，或从该目录运行：
+把 `agent-run` 链接到 PATH（目标已存在时不会覆盖）：
 
 ```bash
-./scripts/agent-run --install
+~/.agents/skills/orchestrate/scripts/agent-run --install   # -> ~/.local/bin/agent-run
 ```
 
-默认创建 `~/.local/bin/agent-run` 符号链接；已存在的目标不会被覆盖。
-确认该目录在 PATH 中。脚本依赖同目录的 Python 辅助脚本和上级目录的任务模板，
-请保留完整 skill 目录。
+在每个主 agent 的全局规则中加一行，例如写进 `~/.claude/CLAUDE.md` 或 `~/.codex/AGENTS.md`：
+
+```markdown
+- 非一两行的实现、诊断、调研或批量杂活，先加载 `orchestrate` skill，按其中的分工派发与验收。
+```
+
+## 个人配置
+
+模型和思考等级的映射写在 `~/.config/agent-run/config`（Bash 格式，覆盖脚本默认值），
+格式见 [references/routing.md](references/routing.md)。
 
 ## 使用
 
 ```bash
-agent-run init-task api-fix --cwd /path/to/repo
-# 填写输出路径中的任务书，然后执行：
-agent-run claude /absolute/path/TASK.md --cwd /path/to/repo --timeout 1200
+agent-run template > /tmp/task.md     # 填写任务书
+agent-run codex fix-paging /tmp/task.md --repo . --tier complex --check "pnpm typecheck"
+agent-run grok bump-deps /tmp/task.md --tier simple
+agent-run agy research-x /tmp/task.md --mode plan
+agent-run ls
 ```
 
-任务书位于 `~/.agents/tasks/<repo>/`，每次运行的独立目录位于 `~/.agents/runs/`。
-可用 `AGENT_RUN_HOME` 修改存放位置。报告包含执行目录、退出码、worker 输出和前后
-Git 快照（暂存/未暂存补丁、新文件路径及哈希）。新文件内容需要在工作目录中审查。
-这些资料不是备份，忽略文件不在 Git 快照范围内。
+- build 模式默认在 `<仓库>-wt/<任务名>` 的独立 worktree 中运行（基于 HEAD），并跳过权限确认；
+  `--in-place` 在原工作区运行，保留权限控制；`--mode plan` 为只读。
+- 产物在 `~/.agent-runs/<仓库>/<任务名>/`：`prompt.md`、`events.jsonl`、`final.md`、`status`、
+  `changes.txt`、`patch.diff`、`check.log`。
+- 退出码 0 只说明进程正常结束，验收以补丁和检查结果为准。脚本不会自动提交、合并或删除 worktree。
+- worker 内再次调用 `agent-run` 会被拒绝。
 
-默认保留权限控制。超时会终止 worker 进程组并返回 124；权限不足或超时后先检查
-部分改动，再决定后续行动。退出码 0 不等于验收通过。
+## 测试
 
-并行仅用于接口稳定、文件范围独立的任务；同仓库并行 CLI 工作使用 `--worktree`。
-它要求原工作区干净，从 HEAD 创建分支，不复制忽略文件、依赖或本地配置。
-宿主审查后负责集成并验证。不会自动提交、合并或删除 worktree。
+```bash
+python3 -m unittest discover -s tests
+```
 
-修订会启动新会话：传入完整原任务、验收条件、修订意见和上次产物路径，并用
-`--cwd <上次执行目录>`，不再添加 `--worktree`。
+测试使用假 worker 和临时仓库，不调用任何模型。
 
 ## 从旧版迁移
 
-新版不需要 `references/identity.md` 常驻加载。旧版若已向全局规则复制 Session Lead，
-更新 skill 不会自动移除它；经用户授权并备份后，仅移除当时复制的部分。
+- 旧版接口 `agent-run <worker> TASK.md --cwd ...`、`init-task`、`--worktree` 已移除；现在默认使用 worktree，
+  `--repo` 替代 `--cwd`。
+- 旧版的 `references/identity.md` 和 Python 辅助脚本已删除。
+- zcode 不再支持，改用 cc-api。
