@@ -5,9 +5,10 @@ description: >
   host) faces non-trivial work: decide what to do itself and what to dispatch to
   other CLI agents (Codex, Claude, cc-api, Grok, Antigravity) by role and difficulty,
   run them through agent-run, and verify results before integrating. Use for
-  implementation, refactoring, diagnosis, research, or bulk chores that can be
-  scoped and handed off, and whenever the user asks to delegate, parallelize, or get
-  a second opinion. Skip for one- or two-line edits and pure Q&A.
+  implementation, refactoring, diagnosis, research, or bulk chores; the default is
+  to dispatch and spread work across workers rather than implement on the host.
+  Also use whenever the user asks to delegate, parallelize, or get a second
+  opinion. Skip for one- or two-line edits and pure Q&A.
 ---
 
 # Orchestrate
@@ -18,29 +19,58 @@ a fresh conversation that sees only the task file.
 
 ## Roles
 
-Route by role first, then by availability. Defaults (see
-[references/routing.md](references/routing.md) for tiers and user overrides):
+The orchestrator plans, decides, reviews, and integrates; workers implement. Default
+to dispatch: the question is not "should I hand this off?" but "which worker gets
+it?". The orchestrator keeps only:
 
-| Work | Default owner |
+- Scoping, decomposition, architecture decisions, and the interface contracts it
+  writes into task files.
+- Review, integration, final checks, and the report.
+- Edits faster to make than to describe: one file, roughly 20 changed lines or
+  fewer, intent fully clear.
+- Work that depends on conversation context that cannot be written into a task
+  file, and fixes after two failed revisions.
+
+Everything else goes to a worker, including core logic, UI, and docs. The
+orchestrator owns their design and acceptance, not their typing. Before editing
+code yourself, check the list above; if the edit is not on it, write a task file.
+
+Route by strength (tiers and user overrides in
+[references/routing.md](references/routing.md)):
+
+| Worker | Give it |
 | --- | --- |
-| Core logic, architecture decisions, UI/frontend, docs (README, technical docs, reports), integration and verification | Orchestrator itself |
-| Backend: APIs, server code, databases, migrations; any well-scoped implementation, diagnosis, or refactor that can be done independently | `codex` (first choice) |
-| Second opinion on very hard problems, deep diagnosis, architecture cross-check | `codex --tier hard` |
-| Chores: bulk mechanical edits, lookups, small scripts, version checks, file housekeeping, simple summaries | `grok` or `cc-api` (after Codex in priority) |
-| Web research, visual/design review, document and media conversion | `agy` |
-| Frontend or docs work when the orchestrator is not Claude | `claude` |
+| `codex` | Reasoning-heavy code: backend, APIs, databases, migrations, core business logic, complex refactors, root-cause diagnosis, tests that protect business rules. `--tier hard` for a second opinion or architecture cross-check. |
+| `cc-api` | Claude-style work on a separate quota: frontend and UI components, docs, README, reports, skills and prompts, copy. Medium implementation when Codex is busy. Use `--tier complex` (or `hard`) for these; its default `simple` tier is for chores. |
+| `grok` | Fast and cheap, with live web and X context: bulk mechanical edits, renames, wiring, fixtures, i18n strings, config housekeeping, dependency and version checks and bumps, small scripts, current package or API facts, summaries of logs and files. Also a parallel read-only reviewer. |
+| `agy` | Web research, visual/design review, document and media conversion. |
+| `claude` | Frontend or docs when the orchestrator is not Claude. |
+
+Spread the load:
+
+- Do not funnel everything to Codex. Give Codex the reasoning-heavy part and send
+  the mechanical, UI, and docs parts of the same task to `grok` and `cc-api` in
+  parallel, each with distinct file ownership and the shared contract in its task
+  file. Example: a feature becomes `codex` backend + `cc-api` frontend + `grok`
+  wiring, fixtures, and strings.
+- When the preferred worker is already busy and the task fits another, give it to
+  an idle worker instead of queueing.
+- For hard diagnosis or review, run two read-only workers in parallel (for example
+  `codex --tier hard` and `grok`, both `--mode plan`) and compare their findings.
+- Chore task files can be a few lines. Template overhead is not a reason to take
+  work back.
 
 Rules that apply to every host:
 
-- Do not dispatch to your own product at the same tier just to offload work; doing
-  it yourself is cheaper. Dispatching to yourself at a different tier (for example
-  Codex host asking `codex --tier hard` for a second opinion) is fine.
+- Do not dispatch to your own product at the same tier just to offload work.
+  Dispatching to yourself at a different tier (for example Codex host asking
+  `codex --tier hard` for a second opinion) is fine. `cc-api` runs a separate
+  config and quota, so a Claude host should use it for UI and docs; it is not
+  self-dispatch.
 - Dispatch without asking when the task falls in a role above. Dispatch independent
-  subtasks in the same turn, each with distinct file ownership.
-- Do trivial edits directly when dispatch clearly costs more than it saves, but do
-  not use that as a reason to do everything yourself.
-- If a worker CLI is unavailable or failing, fall back to the next owner or do it
-  yourself. Do not install tools or change credentials to satisfy routing.
+  subtasks in the same turn.
+- If a worker CLI is unavailable or failing, fall back to another worker that fits,
+  then to yourself. Do not install tools or change credentials to satisfy routing.
 - Workers never re-delegate. agent-run refuses nested calls.
 
 ## Dispatch
@@ -89,4 +119,5 @@ summary. Exit 0 only means the process finished.
 - Do not commit, push, or publish unless the user asked.
 
 Report the outcome, the checks actually run, unverified runtime/browser/device
-behavior, remaining risks, and which parts each agent did.
+behavior, remaining risks, and which parts each agent did. If the orchestrator
+wrote substantial code itself, say why it was not dispatched.

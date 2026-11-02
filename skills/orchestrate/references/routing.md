@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | `codex` | `codex exec` | Sandbox `workspace-write` (build) or `read-only` (plan). Final report via `-o`. |
 | `claude` | `claude -p` | Native Claude Code with the user's normal config. |
-| `cc-api` | `claude -p` with `CLAUDE_CONFIG_DIR=$CC_API_CONFIG_DIR` | Claude Code backed by another API (for example GLM). `--effort` only `low`, `high`, `max`. Default tier `simple`. |
+| `cc-api` | `claude -p` with `CLAUDE_CONFIG_DIR=$CC_API_CONFIG_DIR` | Claude Code backed by another API (for example GLM). `--effort` only `low`, `high`, `max`. Default tier `simple` (chores); pass `--tier complex` or `hard` for UI and docs work. |
 | `grok` | `grok -p` | |
 | `agy` | `agy -p` | Model fixed by agy's own settings; `--model` / `--effort` rejected. |
 
