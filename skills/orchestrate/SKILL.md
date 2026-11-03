@@ -40,17 +40,17 @@ Route by strength (tiers and user overrides in
 
 | Worker | Give it |
 | --- | --- |
-| `codex` | Reasoning-heavy code: backend, APIs, databases, migrations, core business logic, complex refactors, root-cause diagnosis, tests that protect business rules. `--tier hard` for a second opinion or architecture cross-check. |
-| `cc-api` | Claude-style work on a separate quota: frontend and UI components, docs, README, reports, skills and prompts, copy. Medium implementation when Codex is busy. Use `--tier complex` (or `hard`) for these; its default `simple` tier is for chores. |
-| `grok` | Fast and cheap, with live web and X context: bulk mechanical edits, renames, wiring, fixtures, i18n strings, config housekeeping, dependency and version checks and bumps, small scripts, current package or API facts, summaries of logs and files. Also a parallel read-only reviewer. |
+| `codex` | Medium and complex reasoning-heavy code at the default `complex` tier: backend, APIs, databases, migrations, core business logic, complex refactors, root-cause diagnosis, tests that protect business rules. `--tier hard` is the second brain: a read-only second opinion, architecture cross-check, or plan review (`--mode plan`), not an implementer. |
+| `cc-api` | Medium-complexity Claude-style work on a separate quota at the default `complex` tier: frontend and UI components, docs, README, reports, skills and prompts, copy, scoped implementation. Do not give it hard tasks or pass `--tier hard`. |
+| `grok` | Medium-complexity implementation at the default `complex` tier, plus fast work with live web and X context: bulk mechanical edits, renames, wiring, fixtures, i18n strings, config housekeeping, dependency and version checks and bumps, small scripts (`--tier simple`), current package or API facts, summaries of logs and files. Also a parallel read-only reviewer. |
 | `agy` | Web research, visual/design review, document and media conversion. |
 | `claude` | Frontend or docs when the orchestrator is not Claude. |
 
 Spread the load:
 
-- Do not funnel everything to Codex. Give Codex the reasoning-heavy part and send
-  the mechanical, UI, and docs parts of the same task to `grok` and `cc-api` in
-  parallel, each with distinct file ownership and the shared contract in its task
+- Do not funnel everything to Codex. Give Codex the complex, reasoning-heavy part
+  and send the medium, mechanical, UI, and docs parts of the same task to `grok`
+  and `cc-api` in parallel, each with distinct file ownership and the shared contract in its task
   file. Example: a feature becomes `codex` backend + `cc-api` frontend + `grok`
   wiring, fixtures, and strings.
 - When the preferred worker is already busy and the task fits another, give it to
@@ -91,8 +91,9 @@ Use this skill's `scripts/agent-run` (normally linked as `~/.local/bin/agent-run
      worktree run possible.
    - Read-only tasks (diagnosis, review, research) use `--mode plan` in the original
      checkout.
-   - Choose `--tier` by difficulty: `hard` very hard, `complex` default, `simple`
-     easy, `cu` computer use. Do not default to the highest tier.
+   - Choose `--tier` by difficulty: `complex` (default) for medium and complex
+     work, `simple` for easy chores, `cu` for computer use, `hard` only for the
+     `codex` second brain. Do not default to the highest tier.
    - Add `--check "<command>"` with the project-appropriate check for the change.
 3. Run:
 

@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | `codex` | `codex exec` | Sandbox `workspace-write` (build) or `read-only` (plan). Final report via `-o`. |
 | `claude` | `claude -p` | Native Claude Code with the user's normal config. |
-| `cc-api` | `claude -p` with `CLAUDE_CONFIG_DIR=$CC_API_CONFIG_DIR` | Claude Code backed by another API (for example GLM). `--effort` only `low`, `high`, `max`. Default tier `simple` (chores); pass `--tier complex` or `hard` for UI and docs work. |
+| `cc-api` | `claude -p` with `CLAUDE_CONFIG_DIR=$CC_API_CONFIG_DIR` | Claude Code backed by another API (for example GLM). `--effort` only `low`, `high`, `max`. Medium-complexity work only; map every tier to the same mid-size model. |
 | `grok` | `grok -p` | |
 | `agy` | `agy -p` | Model fixed by agy's own settings; `--model` / `--effort` rejected. |
 
@@ -39,10 +39,14 @@ TIER_codex_complex="gpt-6.1-sol high"
 TIER_codex_simple="gpt-6.1-terra medium"
 TIER_codex_cu="gpt-6.1-terra xhigh"
 TIER_grok_simple="grok-4.7-build-fast -"
-TIER_cc_api_hard="fable max"
-DEFAULT_TIER_cc_api=simple
+TIER_cc_api_complex="glm-5.3-flash[1M] high"
+TIER_cc_api_hard="glm-5.3-flash[1M] high"
 CC_API_CONFIG_DIR="$HOME/.claude-api"
 ```
+
+`codex` `hard` is the second brain (read-only cross-checks); `complex` handles
+both medium and complex implementation. `DEFAULT_TIER_<worker>` changes a worker's
+default tier (built-in default `complex`).
 
 Role preferences beyond the defaults in SKILL.md belong in the user's own global
 rules or the repository's instructions; the orchestrator follows those first.

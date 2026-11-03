@@ -24,7 +24,6 @@ TIER_codex_hard="- xhigh";  TIER_codex_complex="- high";  TIER_codex_simple="- m
 TIER_claude_hard="- max";   TIER_claude_complex="- high"; TIER_claude_simple="- -";      TIER_claude_cu="- high"
 TIER_cc_api_hard="- max";   TIER_cc_api_complex="- high"; TIER_cc_api_simple="- -";      TIER_cc_api_cu="- high"
 TIER_grok_hard="- high";    TIER_grok_complex="- high";   TIER_grok_simple="- -";        TIER_grok_cu="- high"
-DEFAULT_TIER_cc_api=simple
 CC_API_CONFIG_DIR="$HOME/.claude-api"
 # shellcheck source=/dev/null
 [ -f "$CONFIG" ] && . "$CONFIG"
@@ -43,7 +42,7 @@ usage() {
   --in-place          build 模式直接在原工作区运行，保留权限控制（会和未提交改动混在一起）
   --timeout <秒>      超时，默认 1800
   --check "<命令>"    完成后在工作目录执行的检查命令，如 "pnpm -C apps/web typecheck"
-  --tier <难度>       hard | complex | simple | cu（computer use），默认 complex（cc-api 默认 simple）
+  --tier <难度>       hard | complex | simple | cu（computer use），默认 complex
   --model <模型>      手动指定模型，覆盖 --tier
   --effort <等级>     手动指定思考等级，覆盖 --tier；cc-api 只支持 low|high|max；agy 不支持
 
