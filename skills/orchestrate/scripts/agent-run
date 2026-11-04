@@ -104,7 +104,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-case " $AGENTS " in *" $AGENT "*) ;; *) die "不支持的 agent: ${AGENT}（可选: $AGENTS）" ;; esac
+case " $AGENTS " in *" $AGENT "*) ;; *) die "不支持的 agent: ${AGENT}（可选: ${AGENTS}）" ;; esac
 case $TIER in ""|hard|complex|simple|cu) ;; *) die "--tier 只能是 hard、complex、simple 或 cu" ;; esac
 KEY=${AGENT//-/_}
 DEFAULT_TIER_VAR="DEFAULT_TIER_$KEY"
@@ -201,9 +201,9 @@ set -m
 PID=$!
 set +m
 echo "running pid=$PID started=$(date '+%F %T')" > "$RUN/status"
-# 看门狗被终止时一并结束内部 sleep，否则它占着输出管道，调用方要等满超时才返回
-( trap 'kill "$SP" 2>/dev/null; exit 0' TERM; sleep "$TIMEOUT" & SP=$!; wait "$SP"
-  touch "$RUN/.timeout"; kill -TERM -- "-$PID" 2>/dev/null; sleep 10; kill -KILL -- "-$PID" 2>/dev/null ) &
+# 看门狗按秒轮询且不占输出管道：worker 秒退时也不会留下长 sleep 让调用方等满超时
+( SECONDS=0; while [ "$SECONDS" -lt "$TIMEOUT" ]; do sleep 1; done
+  touch "$RUN/.timeout"; kill -TERM -- "-$PID" 2>/dev/null; sleep 10; kill -KILL -- "-$PID" 2>/dev/null ) > /dev/null 2>&1 &
 WATCH=$!
 wait "$PID"; RC=$?
 kill "$WATCH" 2>/dev/null; wait "$WATCH" 2>/dev/null
