@@ -47,7 +47,7 @@ usage() {
   --effort <等级>     手动指定思考等级，覆盖 --tier；cc-api 只支持 low|high|max；agy 不支持
 
 难度映射: 脚本内置默认值，可在 $CONFIG 中覆盖，
-  例如 TIER_codex_hard="gpt-6-astra medium"；CC_API_CONFIG_DIR 指定 cc-api 的 Claude 配置目录。
+  例如 TIER_codex_hard="<模型ID> medium"；CC_API_CONFIG_DIR 指定 cc-api 的 Claude 配置目录。
   agy 的模型固定为其默认设置（--model 不可靠）。
 
 产物目录: ~/.agent-runs/<仓库名>/<任务名>/

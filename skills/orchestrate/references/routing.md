@@ -34,13 +34,13 @@ the defaults. Each entry is `TIER_<worker>_<tier>="<model|-> <effort|->"`, with 
 in worker names written as `_`. Example:
 
 ```bash
-TIER_codex_hard="gpt-6-astra medium"
-TIER_codex_complex="gpt-6.1-sol high"
-TIER_codex_simple="gpt-6.1-terra medium"
-TIER_codex_cu="gpt-6.1-terra xhigh"
-TIER_grok_simple="grok-4.7-build-fast -"
-TIER_cc_api_complex="glm-5.3-flash[1M] high"
-TIER_cc_api_hard="glm-5.3-flash[1M] high"
+TIER_codex_hard="<codex-strongest-model> medium"
+TIER_codex_complex="<codex-main-model> high"
+TIER_codex_simple="<codex-fast-model> medium"
+TIER_codex_cu="<codex-fast-model> xhigh"
+TIER_grok_simple="<grok-fast-model> -"
+TIER_cc_api_complex="<cc-api-model> high"
+TIER_cc_api_hard="<cc-api-model> high"
 CC_API_CONFIG_DIR="$HOME/.claude-api"
 ```
 
