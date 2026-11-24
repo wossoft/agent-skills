@@ -2,11 +2,13 @@
 
 ## Review
 
-1. Check the `acpx` exit code (`0` done, `1` error, `2` bad args, `3` timeout,
-   `4` no session, `5` permission denied, `130` interrupted), ACP `stopReason`, and
-   the worker's final report rather than relying on exit `0` alone (partial
+1. Check the exit code (`0` done, `1` error, `2` bad args, `3` timeout,
+   `4` no session, `5` permission denied, `6` read-only violation from
+   `acpx-dispatch`, `130` interrupted), the `stopReason`, ACP errors/denials, and the
+   worker's final report, all printed by `acpx-dispatch` (also in the run's
+   `final.md` and `events-<n>.jsonl`). Do not rely on exit `0` alone: partial
    permission denials can still exit `0`, since exit `5` triggers only when all
-   permission requests were denied/cancelled and zero approved). If you called
+   permission requests were denied/cancelled and zero approved. If you called
    `cancel`, wait for the turn to settle before reviewing. Inspect partial work
    before deciding anything; never auto-retry timeouts (`3`) or permission
    failures (`5`).
@@ -22,9 +24,9 @@
    - **In-place run**: compare against the pre-dispatch snapshot (`HEAD`, staged
      and unstaged diffs, plus hashes of untracked files in scope) — `git status --porcelain`
      alone cannot distinguish pre-existing user modifications from worker edits.
-   - **Read-only (`exec`) run**: compare pre/post `git diff HEAD` plus untracked
-     file hashes (`git status --porcelain` misses re-edits to already-dirty files);
-     any modification is a violation.
+   - **Read-only (`exec`) run**: `acpx-dispatch` compares pre/post `git diff HEAD`
+     plus untracked file hashes and exits `6` on any change (`git status --porcelain`
+     alone misses re-edits to already-dirty files); any modification is a violation.
 3. Check scope against the task: unexpected files, dependency or configuration
    changes, generated files edited by hand, removed user edits, or unauthorized commits.
 4. Check acceptance criteria and real evidence: run project-appropriate checks in `"$WT"`
@@ -69,22 +71,15 @@ matches closed records across **all repositories** for that adapter, not just
 
 ## Revision
 
-Continue the existing worktree/checkout and named ACP session using the exact same
-quoted absolute `--cwd` and without re-passing `--model`. Keep the **same permission
-boundary** as the initial run:
+Continue the existing worktree/checkout and named ACP session:
 
-- **Worktree revision**:
-  ```bash
-  acpx --cwd "$WT" --approve-all --non-interactive-permissions fail \
-    --suppress-reads --timeout 1800 <worker> -s "$TASK" -f "/tmp/$TASK-rev.md"
-  ```
-- **In-place revision**:
-  ```bash
-  acpx --cwd "$REPO" --approve-reads --non-interactive-permissions deny \
-    --no-terminal --no-fs \
-    --permission-policy '{"autoApprove":["read","search","edit","delete","move"],"defaultAction":"deny"}' \
-    --suppress-reads --timeout 1800 <worker> -s "$TASK" -f "/tmp/$TASK-rev.md"
-  ```
+```bash
+acpx-dispatch revise "$TASK" "/tmp/$TASK-rev.md" --repo "$REPO"
+```
+
+It reuses the recorded worker, mode, absolute `--cwd`, and permission flags, does not
+re-pass `--model`, and keeps `--ttl 3600`. Without the script, rerun the initial
+prompt command from [routing.md](routing.md) with the same flags and `-s "$TASK"`.
 
 Note that if the queue owner exited after idle TTL and the adapter cannot resume
 or load the prior ACP session, `acpx` may create a fresh backend session under the
@@ -96,4 +91,4 @@ already closed, you are switching workers, or context has drifted (when starting
 fresh on prior changes, reuse `"$WT"` or pass the prior patch). After two
 unsuccessful attempts, close the session (`acpx --cwd "$WT" <worker> sessions close "$TASK"`)
 and diagnose or implement on the host, or get a `codex` `hard`-tier read-only
-second opinion via `acpx ... codex exec`.
+second opinion via `acpx-dispatch run codex <task> <file> --mode read-only`.

@@ -1,0 +1,250 @@
+#!/usr/bin/env bash
+# acpx-dispatch：orchestrate 的薄封装。只负责“建 worktree / 建会话 / 设置模式与思考等级 / 发送提示词 /
+# 留存事件流并提取 stopReason 与最终汇报”，验收与合入仍由主 agent 按 references/review.md 手动完成。
+set -uo pipefail
+
+RUNS_HOME="${ACPX_DISPATCH_HOME:-${TMPDIR:-/tmp}/acpx-dispatch}"
+INSTALL_TARGET="${ACPX_DISPATCH_INSTALL:-$HOME/.local/bin/acpx-dispatch}"
+WORKERS="codex claude cc-api grok agy"
+POLICY_RO='{"autoApprove":["read","search"],"defaultAction":"deny"}'
+POLICY_IP='{"autoApprove":["read","search","edit","delete","move"],"defaultAction":"deny"}'
+
+usage() {
+  cat <<EOF
+用法:
+  acpx-dispatch run <worker> <任务名> <提示词文件> [选项]
+  acpx-dispatch revise <任务名> <提示词文件> [--repo <路径>] [--timeout <秒>] [--ttl <秒>]
+  acpx-dispatch report <任务名> [--repo <路径>]   重新打印最近一轮的汇总
+  acpx-dispatch --install                          软链到 $INSTALL_TARGET
+
+worker: $WORKERS
+
+run 选项:
+  --mode worktree|in-place|read-only
+                      worktree（默认）：基于 HEAD 的独立 worktree + 持久会话，--approve-all
+                      in-place：原工作区 + 持久会话，仅放行读/改文件，禁用终端（须串行）
+                      read-only：原工作区 + 无状态 exec，并切换到适配器自身的只读模式
+  --repo <路径>       目标仓库，默认当前目录
+  --model <模型>      只在建会话（或 exec）时传递
+  --effort <等级>     思考等级，按 worker 映射到 reasoning_effort / effort / thought_level
+  --timeout <秒>      单轮超时，默认 1800
+  --ttl <秒>          会话后台进程空闲存活时间，默认 3600（保证验收期间返工仍续用原会话）
+
+产物目录: $RUNS_HOME/<仓库名>/<任务名>/
+  meta.env  events-<轮次>.jsonl  stderr-<轮次>.log  final-<轮次>.md  （final.md 指向最近一轮）
+退出码: 同 acpx（0 完成，1 错误，3 超时，4 无会话，5 权限全部被拒，130 中断）；
+  2 参数错误；6 只读任务改动了工作区。
+EOF
+}
+
+die() { echo "acpx-dispatch: $*" >&2; exit 2; }
+
+effort_key() {
+  case $1 in
+    codex|grok) echo reasoning_effort ;;
+    claude|cc-api) echo effort ;;
+    agy) echo thought_level ;;
+  esac
+}
+
+# 适配器自身的权限模式：只靠 --permission-policy 拦不住原生工具（已实测 codex / claude / agy
+# 不切模式时只读任务照样写文件），必须同时切到适配器的只读或需确认模式。
+mode_option() { # <worker> <read-only|in-place>
+  case $2:$1 in
+    read-only:codex) echo read-only ;;
+    read-only:claude|read-only:cc-api|in-place:claude|in-place:cc-api) echo default ;;
+    read-only:agy) echo plan ;;
+    *) echo "" ;;
+  esac
+}
+
+# 工作区快照：HEAD + 已跟踪改动 + 未跟踪文件哈希，用于识别只读任务的越权改动
+snapshot() {
+  git -C "$1" rev-parse HEAD
+  git -C "$1" diff HEAD --binary
+  git -C "$1" ls-files -o --exclude-standard -z | (cd "$1" && xargs -0 shasum 2>/dev/null)
+}
+
+perm_flags() { # <mode>
+  case $1 in
+    worktree) printf '%s\n' --approve-all --non-interactive-permissions fail ;;
+    in-place) printf '%s\n' --approve-reads --non-interactive-permissions deny --no-terminal --no-fs --permission-policy "$POLICY_IP" ;;
+    read-only) printf '%s\n' --approve-reads --non-interactive-permissions deny --no-terminal --permission-policy "$POLICY_RO" ;;
+  esac
+}
+
+# 校验 acpx --format json 的输出中含有期望的 action，防止“打印错误却退出 0”的情况被放过
+expect_action() { # <输出> <action>
+  printf '%s\n' "$1" | jq -Re --arg a "$2" 'fromjson? | select(.action? == $a)' >/dev/null 2>&1
+}
+
+set_option() { # <worker> <key> <value>
+  local out
+  out=$(acpx --cwd "$CWD" --format json "$WORKER" set "$2" "$3" -s "$TASK" 2>&1)
+  expect_action "$out" config_set || die "设置 $2=$3 失败: $(printf '%s' "$out" | tail -3)"
+  echo "已设置 $2=$3"
+}
+
+# 发送一轮提示词并汇总；$@ 为 acpx 在 <worker> 之后的参数
+send_round() {
+  local round=$1; shift
+  local events="$RUN/events-$round.jsonl" errlog="$RUN/stderr-$round.log" final="$RUN/final-$round.md"
+  local before="" rc perms=()
+  while IFS= read -r f; do perms+=("$f"); done < <(perm_flags "$MODE")
+  [ "$MODE" = read-only ] && before=$(snapshot "$CWD")
+  local start; start=$(date +%s)
+  acpx --cwd "$CWD" --format json "${perms[@]}" --suppress-reads --timeout "$TIMEOUT" --ttl "$TTL" \
+    ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} "$WORKER" "$@" > "$events" 2> "$errlog" < /dev/null
+  rc=$?
+  echo "ROUND=$round" >> "$RUN/meta.env"
+  ln -sf "final-$round.md" "$RUN/final.md"
+  summarize "$round" "$rc" "$(( $(date +%s) - start ))"
+  if [ "$MODE" = read-only ] && [ "$before" != "$(snapshot "$CWD")" ]; then
+    echo "!! 违规：只读任务改动了工作区（对比 git diff HEAD 与未跟踪文件哈希）"
+    git -C "$CWD" status --short
+    return 6
+  fi
+  return "$rc"
+}
+
+summarize() { # <轮次> <rc> <耗时>
+  local events="$RUN/events-$1.jsonl" errlog="$RUN/stderr-$1.log" final="$RUN/final-$1.md" stop
+  # 最终汇报 = 最后一次工具调用之后的 agent 文本
+  jq -rjRn '
+    [inputs | fromjson?] | (map(.params.update.sessionUpdate? // "" | test("^tool_call")) | rindex(true) // -1) as $i
+    | .[$i+1:] | map(select(.params.update.sessionUpdate? == "agent_message_chunk")
+                    | .params.update.content.text? // "") | join("")' "$events" > "$final" 2>/dev/null
+  stop=$(jq -rR 'fromjson? | select(.result.stopReason?) | .result.stopReason' "$events" 2>/dev/null | tail -1)
+  echo "== acpx-dispatch $WORKER/$TASK 第 $1 轮: rc=$2 stopReason=${stop:-无} (${3}s) mode=$MODE"
+  echo "产物: $RUN"
+  [ "$MODE" = read-only ] || echo "会话: acpx --cwd \"$CWD\" $WORKER -s \"$TASK\""
+  [ "$MODE" = worktree ] && echo "worktree: ${CWD}（分支 agent/${TASK}，基线 ${BASE}）"
+  local errs; errs=$(jq -rR 'fromjson? | select(.error?) | .error.data.details? // .error.message' "$events" 2>/dev/null | sort | uniq -c)
+  [ -n "$errs" ] && { echo "-- ACP 错误/拒绝"; echo "$errs"; }
+  if [ "$MODE" != read-only ]; then
+    echo "-- 改动"
+    git -C "$CWD" status --short
+    [ "$MODE" = worktree ] && [ "$(git -C "$CWD" rev-parse HEAD)" != "$BASE" ] && echo "!! 警告：worker 擅自创建了提交"
+  fi
+  echo "-- 最终汇报"; cat "$final"; echo
+  if { [ "$2" != 0 ] && [ "$2" != "?" ]; } || [ ! -s "$final" ]; then echo "-- stderr 末尾"; tail -20 "$errlog"; fi
+}
+
+load_run() { # <任务名> <仓库>
+  local root
+  root=$(git -C "$2" rev-parse --show-toplevel 2>/dev/null) || die "不是 git 仓库: $2"
+  RUN="$RUNS_HOME/$(basename "$root")/$1"
+  [ -f "$RUN/meta.env" ] || die "找不到任务记录: $RUN"
+  # shellcheck source=/dev/null
+  . "$RUN/meta.env"
+}
+
+parse_common() {
+  REPO=$PWD TIMEOUT=1800 TTL=3600 MODE=worktree MODEL="" EFFORT=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --repo) REPO=$2; shift 2 ;;
+      --timeout) TIMEOUT=$2; shift 2 ;;
+      --ttl) TTL=$2; shift 2 ;;
+      --mode) MODE=$2; shift 2 ;;
+      --model) MODEL=$2; shift 2 ;;
+      --effort) EFFORT=$2; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "未知参数: $1" ;;
+    esac
+  done
+  [[ $TIMEOUT =~ ^[0-9]+$ ]] || die "--timeout 必须是秒数"
+  [[ $TTL =~ ^[0-9]+$ ]] || die "--ttl 必须是秒数"
+}
+
+cmd_run() {
+  [ $# -ge 3 ] || { usage; exit 2; }
+  WORKER=$1 TASK=$2 PROMPT=$3; shift 3
+  parse_common "$@"
+  case " $WORKERS " in *" $WORKER "*) ;; *) die "不支持的 worker: ${WORKER}（可选: ${WORKERS}）" ;; esac
+  case $MODE in worktree|in-place|read-only) ;; *) die "--mode 只能是 worktree、in-place 或 read-only" ;; esac
+  [[ $TASK =~ ^[a-z0-9][a-z0-9._-]*$ ]] || die "任务名只能用小写字母、数字、. _ -"
+  [ -f "$PROMPT" ] || die "提示词文件不存在: $PROMPT"
+  [ "$MODE:$WORKER" = in-place:agy ] && die "agy 的原生工具不遵守 --permission-policy，不能 in-place，请用 worktree"
+  [ "$WORKER" = agy ] && [ -n "$MODEL" ] && die "agy 的模型由其自身设置决定，不支持 --model"
+  command -v acpx >/dev/null || die "找不到 acpx"
+  command -v jq >/dev/null || die "找不到 jq"
+
+  local root; root=$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null) || die "不是 git 仓库: $REPO"
+  RUN="$RUNS_HOME/$(basename "$root")/$TASK"
+  [ -e "$RUN" ] && die "任务名已存在: ${RUN}（换个名字，或确认后删除旧记录）"
+  BASE=$(git -C "$root" rev-parse HEAD)
+  CWD=$root
+  if [ "$MODE" = worktree ]; then
+    CWD="$(cd "$(dirname "$root")" && pwd)/$(basename "$root")-wt/$TASK"
+    [ -n "$(git -C "$root" status --porcelain)" ] && echo "注意：主工作区有未提交改动，worktree 基于 HEAD，看不到这些改动" >&2
+    git -C "$root" worktree add -q -b "agent/$TASK" "$CWD" "$BASE" || die "创建 worktree 失败"
+  fi
+  [ -f "$CWD/.acpxrc.json" ] && echo "注意：$CWD/.acpxrc.json 会覆盖全局 acpx 配置" >&2
+  mkdir -p "$RUN"
+  {
+    printf 'WORKER=%q\nTASK=%q\nMODE=%q\nCWD=%q\nREPO=%q\nBASE=%q\n' "$WORKER" "$TASK" "$MODE" "$CWD" "$root" "$BASE"
+  } > "$RUN/meta.env"
+
+  MODEL_ARGS=(); [ -n "$MODEL" ] && MODEL_ARGS=(--model "$MODEL")
+  local ekey mopt; ekey=$(effort_key "$WORKER"); mopt=$(mode_option "$WORKER" "$MODE")
+
+  if [ "$MODE" = read-only ]; then
+    local opts=()
+    [ -n "$mopt" ] && opts+=(--config-option "mode=$mopt")
+    [ -n "$EFFORT" ] && opts+=(--config-option "$ekey=$EFFORT")
+    send_round 1 exec ${opts[@]+"${opts[@]}"} -f "$PROMPT"
+    exit $?
+  fi
+
+  # 持久会话：--model 只在 sessions new 传；校验 JSON 输出而不是只看退出码
+  local perms=() out
+  while IFS= read -r f; do perms+=("$f"); done < <(perm_flags "$MODE")
+  out=$(acpx --cwd "$CWD" --format json "${perms[@]}" --ttl "$TTL" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} \
+    "$WORKER" sessions new --name "$TASK" 2>&1)
+  if ! expect_action "$out" session_ensured; then
+    # 尚未发送任何提示词：回滚本次新建的 worktree、分支与记录，便于修正参数后用同名重试
+    if [ "$MODE" = worktree ]; then
+      git -C "$root" worktree remove --force "$CWD" && git -C "$root" branch -D "agent/$TASK" >/dev/null
+    fi
+    rm -rf "$RUN"
+    die "创建会话失败（已回滚）: $(printf '%s' "$out" | tail -3)"
+  fi
+  echo "已创建会话 $TASK"
+  MODEL_ARGS=()
+  [ -n "$mopt" ] && set_option "$WORKER" mode "$mopt"
+  [ -n "$EFFORT" ] && set_option "$WORKER" "$ekey" "$EFFORT"
+  send_round 1 -s "$TASK" -f "$PROMPT"
+}
+
+cmd_revise() {
+  [ $# -ge 2 ] || { usage; exit 2; }
+  local task=$1 prompt=$2; shift 2
+  parse_common "$@"
+  [ -f "$prompt" ] || die "提示词文件不存在: $prompt"
+  load_run "$task" "$REPO"
+  [ "$MODE" = read-only ] && die "read-only 任务没有持久会话，请用新任务名重新 run"
+  MODEL_ARGS=()
+  send_round "$(( ${ROUND:-1} + 1 ))" -s "$TASK" -f "$prompt"
+}
+
+cmd_report() {
+  [ $# -ge 1 ] || { usage; exit 2; }
+  local task=$1; shift
+  parse_common "$@"
+  load_run "$task" "$REPO"
+  summarize "${ROUND:-1}" "?" "?"
+}
+
+case ${1:-} in
+  -h|--help|"") usage; exit 0 ;;
+  --install)
+    { [ -e "$INSTALL_TARGET" ] || [ -L "$INSTALL_TARGET" ]; } && die "目标已存在: ${INSTALL_TARGET}（确认后自行移走再安装）"
+    src="${BASH_SOURCE[0]}"; src="$(cd "$(dirname "$src")" && pwd)/$(basename "$src")"
+    mkdir -p "$(dirname "$INSTALL_TARGET")" && ln -s "$src" "$INSTALL_TARGET" && echo "已安装 $INSTALL_TARGET -> $src"
+    exit 0 ;;
+  run) shift; cmd_run "$@" ;;
+  revise) shift; cmd_revise "$@" ;;
+  report) shift; cmd_report "$@" ;;
+  *) die "未知命令: ${1}（run / revise / report）" ;;
+esac

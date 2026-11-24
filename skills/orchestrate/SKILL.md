@@ -86,81 +86,54 @@ and confirm the request, response (including pagination), and generated client
 method and types where applicable. While a contract is unsettled, delegate
 independent work such as routes or layouts if useful and defer API binding.
 
-1. Write the prompt to a file outside the repository (for example `/tmp/<task>.md`),
-   starting from [references/task-template.md](references/task-template.md). State goal,
+1. Pick a short slug without `/` for `$TASK` (for example `fix-paging`), and write
+   the prompt to a file outside the repository (`/tmp/$TASK.md`), starting from
+   [references/task-template.md](references/task-template.md). State goal,
    allowed files, contracts, relevant repository rules the worker may not load,
    prohibitions, and acceptance criteria, and keep the worker contract and required
    Chinese report structure (`## 改动文件`, `## 做了什么`, `## 没做什么`, `## 不确定 / 风险`)
    at the bottom.
-2. Choose execution mode and model/effort per [references/routing.md](references/routing.md),
-   and keep one quoted absolute working path (`"$WT"` or `"$REPO"`) consistent across
-   session creation, `set`, prompts, `status`, `cancel`, and `sessions close`:
-   - **Writable (default — isolated worktree + persistent session)**:
-     ```bash
-     BASE=$(git -C "$REPO" rev-parse HEAD) &&
-     WT="$(cd "$(dirname "$REPO")" && pwd)/$(basename "$REPO")-wt/$TASK" &&
-     git -C "$REPO" worktree add -b "agent/$TASK" "$WT" "$BASE" &&
-     acpx --cwd "$WT" [--model "<model>"] <worker> sessions new --name "$TASK" &&
-     # optional when setting non-default effort (omit for agy):
-     acpx --cwd "$WT" <worker> set <effort-key> <effort> -s "$TASK" &&
-     acpx --cwd "$WT" --approve-all --non-interactive-permissions fail \
-       --suppress-reads --timeout 1800 <worker> -s "$TASK" -f "/tmp/$TASK.md"
-     ```
-     - Use `sessions new` (not `sessions ensure`) for fresh tasks so a reused task
-       name never inherits stale context.
-     - Pass `--model` ONLY on `sessions new`, never on `set` or `prompt`, so `acpx`
-       preserves `desired_config_options`. Do not rely on `&&` / exit code alone for
-       `sessions new` or `set`: in `acpx 0.22.0`, an unsupported `--model` on
-       `sessions new` (leaving no session created) and an invalid `set` option both
-       exit `0` after printing an error. Verify stdout (`created session` / session
-       UUID for `sessions new`; `config set:` for `set`) before sending the prompt.
-     - A worktree isolates only the Git checkout from `$BASE`; it does not see
-       uncommitted changes and does not sandbox external files or network. Never commit
-       or stash user changes to make a worktree run possible. Also check whether the
-       target checkout contains `.acpxrc.json`, which overrides adapter/MCP config.
-   - **Writable in-place (only when uncommitted checkout changes are required; run serially)**:
-     Use only when the adapter constrains writes appropriately under policy (see
-     [references/routing.md](references/routing.md) for caveats). Snapshot pre-dispatch
-     state beyond `git status --porcelain` (`HEAD`, staged/unstaged diffs, and
-     hashes of untracked files in scope), and pass the exact same permission flags on
-     `sessions new`, initial prompt, and any revisions using a fresh unique `$TASK`:
-     ```bash
-     acpx --cwd "$REPO" --approve-reads --non-interactive-permissions deny \
-       --no-terminal --no-fs \
-       --permission-policy '{"autoApprove":["read","search","edit","delete","move"],"defaultAction":"deny"}' \
-       [--model "<model>"] <worker> sessions new --name "$TASK" &&
-     # optional when setting non-default effort (omit for agy):
-     acpx --cwd "$REPO" <worker> set <effort-key> <effort> -s "$TASK" &&
-     acpx --cwd "$REPO" --approve-reads --non-interactive-permissions deny \
-       --no-terminal --no-fs \
-       --permission-policy '{"autoApprove":["read","search","edit","delete","move"],"defaultAction":"deny"}' \
-       --suppress-reads --timeout 1800 <worker> -s "$TASK" -f "/tmp/$TASK.md"
-     ```
-   - **Read-only (diagnosis, review, research — default stateless `acpx exec`)**:
-     ```bash
-     acpx --cwd "$REPO" --approve-reads --non-interactive-permissions deny \
-       --no-terminal --permission-policy '{"autoApprove":["read","search"],"defaultAction":"deny"}' \
-       --suppress-reads --timeout 1800 [--model "<model>"] \
-       <worker> exec [--config-option <effort-key>=<effort>] -f "/tmp/$TASK.md"
-     ```
-     Compare pre/post snapshots (`git diff HEAD` plus untracked file hashes, not
-     `git status --porcelain` alone) to verify no edits occurred. Note that
-     `--no-terminal` and `--permission-policy` enforce ACP client callbacks only;
-     strict read-only isolation for adapter-native tools/MCP requires an adapter
-     read-only mode or OS sandbox. Use a named persistent session only when
-     multi-turn investigation is explicitly needed.
+2. Dispatch with this skill's `scripts/acpx-dispatch` (normally linked as
+   `~/.local/bin/acpx-dispatch` via `acpx-dispatch --install`; `--help` for options).
+   It wraps the `acpx` recipe in [references/routing.md](references/routing.md):
+   creates the worktree and named session, passes `--model` only at creation, switches
+   the adapter's own permission mode, sets effort, verifies each step from
+   `--format json` output (rolling back the worktree if session creation fails), sends
+   the prompt with `--ttl 3600`, and prints `stopReason`, ACP errors/denials, changed
+   files, and the worker's final report. Choose model/effort per routing.md.
+   ```bash
+   # Writable (default): isolated worktree at HEAD + persistent session
+   acpx-dispatch run <worker> "$TASK" "/tmp/$TASK.md" --repo "$REPO" [--model <m>] [--effort <e>]
+   # Writable in-place (only when uncommitted changes are required; serial only)
+   acpx-dispatch run <worker> "$TASK" "/tmp/$TASK.md" --repo "$REPO" --mode in-place
+   # Read-only (diagnosis, review, research): stateless exec in adapter read-only mode
+   acpx-dispatch run <worker> "$TASK" "/tmp/$TASK.md" --repo "$REPO" --mode read-only
+   ```
+   - The worktree sees only `HEAD`, not uncommitted changes, and does not sandbox
+     external files or network. Never commit or stash user changes to make a worktree
+     run possible; describe needed changes in the task file or use `--mode in-place`.
+   - `--mode in-place` is refused for `agy`, whose native tools ignore the permission
+     policy; for other adapters see the caveats in routing.md.
+   - Read-only runs snapshot `git diff HEAD` plus untracked file hashes before and
+     after, and exit `6` if anything changed. Exit `5` in read-only means every
+     permission request was denied (for example a write or shell attempt); read the
+     report before judging.
+   - Artifacts live in `${TMPDIR:-/tmp}/acpx-dispatch/<repo>/<task>/`
+     (`events-<n>.jsonl`, `final.md`, `stderr-<n>.log`, `meta.env`);
+     `acpx-dispatch report "$TASK" --repo "$REPO"` reprints the latest round.
+   - If the script is unavailable, run the raw `acpx` commands in routing.md.
 3. Long runs & control:
-   - Use the host's background execution for long runs. For named sessions, monitor
-     with `acpx --cwd "$WT" <worker> status -s "$TASK"` (`running` = healthy background
-     process; `no-session` exits 0) or `acpx --cwd "$WT" --suppress-reads <worker> sessions watch -s "$TASK"`
-     (stopping a watcher does not cancel the turn). For `exec`, monitor via the host
-     background task.
+   - Run `acpx-dispatch` with the host's background execution. For named sessions,
+     monitor with `acpx --cwd "$WT" <worker> status -s "$TASK"` (`running` = healthy;
+     `no-session` exits 0) or `acpx --cwd "$WT" --suppress-reads <worker> sessions watch -s "$TASK"`
+     (stopping a watcher does not cancel the turn), or tail the run's `events-<n>.jsonl`.
    - Cancel an active named session cooperatively with
      `acpx --cwd "$WT" <worker> cancel -s "$TASK"` (`cancelled: false` exits 0 if
      nothing is active), and wait for the turn to settle before reviewing.
-   - `acpx` exit codes: `0` done, `1` error, `2` bad args, `3` timeout, `4` no session,
-     `5` permission denied (only when all permission requests were denied and 0 approved),
-     `130` interrupted. Do not auto-retry `3` or `5`.
+   - Exit codes follow `acpx`: `0` done, `1` error, `2` bad args, `3` timeout,
+     `4` no session, `5` permission denied (only when all permission requests were
+     denied and 0 approved), `130` interrupted; `acpx-dispatch` adds `6` for a
+     read-only violation. Do not auto-retry `3` or `5`.
 
 ## Accept and integrate
 
@@ -169,22 +142,24 @@ a revision. Apply small, low-risk fixes on the host when that is faster. Return
 substantial gaps or regressions to the worker with the failed check or unmet
 acceptance criterion.
 
-Follow [references/review.md](references/review.md). Judge from exit code + `stopReason`,
-actual git diffs/hashes, project checks, and the files themselves — never from the
+Follow [references/review.md](references/review.md). Judge from exit code + `stopReason`
+(printed by `acpx-dispatch`), actual git diffs/hashes, project checks, and the files themselves — never from the
 worker's own summary. Exit `0` alone only means `acpx` finished (partial permission
 denials can still exit `0`).
+
+`$WT` and `$BASE` below are printed by `acpx-dispatch` and stored in the run's
+`meta.env` (`CWD`, `BASE`).
 
 - PASS: generate a `--binary` patch against `$BASE`, apply it to `"$REPO"`, and run
   checks in `"$REPO"`. Only after apply and checks succeed, close the ACP session
   (`acpx --cwd "$WT" <worker> sessions close "$TASK"`) BEFORE removing the worktree
   and branch (`git -C "$REPO" worktree remove --force "$WT" && git -C "$REPO" branch -D "agent/$TASK"`).
-- REVISION: continue in the same worktree/checkout and named ACP session without
-  re-passing `--model`, keeping the **same permission flags** as the initial run
-  (`--approve-all --non-interactive-permissions fail` for worktree, or the full
-  in-place permission flags for in-place). Because `acpx` may recreate the backend
-  session if the queue owner exited and adapter resume fails, still re-state scope,
-  prohibitions, and acceptance criteria in the revision prompt. Start a fresh session
-  only when switching workers, after `exec` / `close`, or to reset polluted context.
+- REVISION: `acpx-dispatch revise "$TASK" "/tmp/$TASK-rev.md" --repo "$REPO"`
+  continues the same worktree/checkout and named session with the same permission
+  flags and no `--model`. Because a session can still be recreated if its backend
+  process exited and the adapter cannot resume, re-state scope, prohibitions, and
+  acceptance criteria in the revision prompt. Start a fresh task only when switching
+  workers, after a read-only run or `close`, or to reset polluted context.
   After two failed revisions, stop redispatching; close the session and diagnose or
   implement on the host.
 - Do not commit, push, or publish unless the user asked.
