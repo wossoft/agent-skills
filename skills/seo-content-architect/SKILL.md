@@ -22,7 +22,7 @@ Skip the inventory step for a new site.
 
 ## 1. Define the site identity
 
-Create `site-identity.md` before planning pages. State:
+Create `site-identity.md` (or the identity section of `seo-plan.md` for a small site; see Deliverables) before planning pages. State:
 
 - who the site or organization is;
 - what it offers;
@@ -137,7 +137,7 @@ Do not impose a minimum word count. Remove repetition, generic introductions, an
 
 ## 8. Design internal links
 
-Create `internal-links.md` with a concise link map containing source page, destination page, relationship, reader reason, and suggested anchor concept.
+Create `internal-links.md` (or the link map section of `seo-plan.md` for a small site) with a concise link map containing source page, destination page, relationship, reader reason, and suggested anchor concept.
 
 - Use links to express both hierarchy and semantic relationships.
 - Link hubs to children and children back to their relevant hub.

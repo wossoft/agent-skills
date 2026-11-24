@@ -166,7 +166,7 @@ Size words (`xs`, `sm`, `md`, `lg`, `xl`) are relative and map to the library's 
 | `data` | Source of displayed data | `GET /api/orders?status&q&page` |
 | `bind` | Field or state this input controls | `filters.status` |
 | `visible` / `disabled` | Condition | `permission(Orders.Create)`, `selection.empty` |
-| `responsive` | Overrides per breakpoint (mobile-first) | `{ md: { cols: 2 }, sm: { cols: 1 } }` |
+| `responsive` | Overrides at or below breakpoint (desktop-first) | `{ md: { cols: 2 }, sm: { cols: 1 } }` |
 | `hint` | Free text for anything the grammar cannot express | `首列固定` |
 
 ### Actions

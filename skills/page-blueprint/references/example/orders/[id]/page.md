@@ -28,7 +28,7 @@ presentation: { type: Sheet, side: right, size: lg, over: /orders }
           actions: ["@OrderStatusBadge"]
           children:
             - Grid: { cols: 2, responsive: { sm: { cols: 1 } }, children: [Text: 客户, Text: 下单时间, Text: 收货地址, Text: 备注] }
-      - Section#items:
+      - Section#items-section:
           title: 商品
           children:
             - Table#items:
@@ -64,4 +64,4 @@ ship-order:
 
 ## Open questions
 
-- 发货后是否需要同时刷新底层列表 `/orders` 的 `DataTable#orders`？当前假设关闭抽屉时刷新。
+- 发货后是否需要同时刷新底层列表 `/orders` 的 `DataTable#table`？当前假设关闭抽屉时刷新。
