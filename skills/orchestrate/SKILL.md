@@ -81,6 +81,11 @@ Rules that apply to every host:
 
 ## Dispatch
 
+Before dispatching API binding work, check the relevant repository conventions
+and confirm the request, response (including pagination), and generated client
+method and types where applicable. While a contract is unsettled, delegate
+independent work such as routes or layouts if useful and defer API binding.
+
 1. Write the prompt to a file outside the repository (for example `/tmp/<task>.md`),
    starting from [references/task-template.md](references/task-template.md). State goal,
    allowed files, contracts, relevant repository rules the worker may not load,
@@ -158,6 +163,11 @@ Rules that apply to every host:
      `130` interrupted. Do not auto-retry `3` or `5`.
 
 ## Accept and integrate
+
+Review the worker's diff and run the relevant project checks before deciding on
+a revision. Apply small, low-risk fixes on the host when that is faster. Return
+substantial gaps or regressions to the worker with the failed check or unmet
+acceptance criterion.
 
 Follow [references/review.md](references/review.md). Judge from exit code + `stopReason`,
 actual git diffs/hashes, project checks, and the files themselves — never from the
