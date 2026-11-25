@@ -5,7 +5,7 @@ set -uo pipefail
 
 RUNS_HOME="${ACPX_DISPATCH_HOME:-${TMPDIR:-/tmp}/acpx-dispatch}"
 INSTALL_TARGET="${ACPX_DISPATCH_INSTALL:-$HOME/.local/bin/acpx-dispatch}"
-WORKERS="codex claude cc-api grok agy"
+WORKERS="codex claude grok agy"
 POLICY_RO='{"autoApprove":["read","search"],"defaultAction":"deny"}'
 POLICY_IP='{"autoApprove":["read","search","edit","delete","move"],"defaultAction":"deny"}'
 
@@ -42,7 +42,7 @@ die() { echo "acpx-dispatch: $*" >&2; exit 2; }
 effort_key() {
   case $1 in
     codex|grok) echo reasoning_effort ;;
-    claude|cc-api) echo effort ;;
+    claude) echo effort ;;
     agy) echo thought_level ;;
   esac
 }
@@ -52,10 +52,18 @@ effort_key() {
 mode_option() { # <worker> <read-only|in-place>
   case $2:$1 in
     read-only:codex) echo read-only ;;
-    read-only:claude|read-only:cc-api|in-place:claude|in-place:cc-api) echo default ;;
+    read-only:claude|in-place:claude) echo default ;;
     read-only:agy) echo plan ;;
     *) echo "" ;;
   esac
+}
+
+# claude worker 的 API 模式配置（ANTHROPIC_BASE_URL / AUTH_TOKEN 等）写在执行机 ~/.claude/settings.json 的 env 里，
+# 而 acpx 默认只加载 project / local 设置，不放开会报 "Authentication required"（已实测）。
+# 显式设置 ACPX_CLAUDE_INCLUDE_USER_SETTINGS=0 可恢复 acpx 默认隔离。
+claude_env() {
+  [ "$WORKER" = claude ] && export ACPX_CLAUDE_INCLUDE_USER_SETTINGS="${ACPX_CLAUDE_INCLUDE_USER_SETTINGS:-1}"
+  return 0
 }
 
 # 工作区快照：HEAD + 已跟踪改动 + 未跟踪文件哈希，用于识别只读任务的越权改动
@@ -168,6 +176,7 @@ cmd_run() {
   [ "$MODE:$WORKER" = in-place:agy ] && die "agy 的原生工具不遵守 --permission-policy，不能 in-place，请用 worktree"
   [ "$WORKER" = agy ] && [ -n "$MODEL" ] && die "agy 的模型由其自身设置决定，不支持 --model"
   command -v acpx >/dev/null || die "找不到 acpx"
+  claude_env
   command -v jq >/dev/null || die "找不到 jq"
 
   local root; root=$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null) || die "不是 git 仓库: $REPO"
@@ -224,6 +233,7 @@ cmd_revise() {
   [ -f "$prompt" ] || die "提示词文件不存在: $prompt"
   load_run "$task" "$REPO"
   [ "$MODE" = read-only ] && die "read-only 任务没有持久会话，请用新任务名重新 run"
+  claude_env
   MODEL_ARGS=()
   send_round "$(( ${ROUND:-1} + 1 ))" -s "$TASK" -f "$prompt"
 }

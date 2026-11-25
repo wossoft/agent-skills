@@ -1,5 +1,9 @@
 # Review and integration
 
+Run every command in this file on the executor machine through the computer MCP's
+`run_command` (`dir: "$REPO"`). `$WT`, `/tmp`, and the run artifacts exist only
+there. Files in `$REPO` itself can also be read on the host through the shared mount.
+
 ## Review
 
 1. Check the exit code (`0` done, `1` error, `2` bad args, `3` timeout,
@@ -74,7 +78,7 @@ matches closed records across **all repositories** for that adapter, not just
 Continue the existing worktree/checkout and named ACP session:
 
 ```bash
-acpx-dispatch revise "$TASK" "/tmp/$TASK-rev.md" --repo "$REPO"
+acpx-dispatch revise "$TASK" "$REPO/.git/orchestrate/$TASK-rev.md" --repo "$REPO"
 ```
 
 It reuses the recorded worker, mode, absolute `--cwd`, and permission flags, does not

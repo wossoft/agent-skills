@@ -16,6 +16,8 @@ args = sys.argv[1:]
 log = os.environ['FAKE_LOG']
 with open(os.path.join(log, 'calls.jsonl'), 'a') as f:
     f.write(json.dumps(args) + '\n')
+with open(os.path.join(log, 'env.jsonl'), 'a') as f:
+    f.write(json.dumps(os.environ.get('ACPX_CLAUDE_INCLUDE_USER_SETTINGS')) + '\n')
 cwd = args[args.index('--cwd') + 1]
 if 'sessions' in args and 'new' in args:
     if os.environ.get('FAKE_FAIL_NEW'):
@@ -109,8 +111,7 @@ class DispatchTests(unittest.TestCase):
         self.assertIn('第 2 轮', r.stdout)
 
     def test_read_only_uses_exec_with_adapter_read_only_mode(self):
-        for worker, mode in (('codex', 'mode=read-only'), ('claude', 'mode=default'),
-                             ('cc-api', 'mode=default'), ('agy', 'mode=plan')):
+        for worker, mode in (('codex', 'mode=read-only'), ('claude', 'mode=default'), ('agy', 'mode=plan')):
             r = self.dispatch('run', worker, f'ro-{worker}', str(self.task), '--repo', str(self.repo),
                               '--mode', 'read-only')
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -146,6 +147,24 @@ class DispatchTests(unittest.TestCase):
         self.assertFalse((self.root / 'repo-wt' / 't1').exists())
         self.assertFalse(self.run_dir('t1').exists())
         self.assertNotIn('agent/t1', self.git('branch').stdout)
+
+    def test_claude_includes_user_settings_by_default(self):
+        self.env.pop('ACPX_CLAUDE_INCLUDE_USER_SETTINGS', None)
+        r = self.dispatch('run', 'claude', 'c1', str(self.task), '--repo', str(self.repo))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.dispatch('revise', 'c1', str(self.task), '--repo', str(self.repo))
+        self.dispatch('run', 'codex', 'x1', str(self.task), '--repo', str(self.repo), '--mode', 'read-only')
+        envs = [json.loads(l) for l in (self.log / 'env.jsonl').read_text().splitlines()]
+        self.assertEqual(envs[:-1], ['1'] * (len(envs) - 1))
+        self.assertIsNone(envs[-1])
+        self.dispatch('run', 'claude', 'c2', str(self.task), '--repo', str(self.repo), '--mode', 'read-only',
+                      ACPX_CLAUDE_INCLUDE_USER_SETTINGS='0')
+        self.assertEqual(json.loads((self.log / 'env.jsonl').read_text().splitlines()[-1]), '0')
+
+    def test_rejects_retired_cc_api_worker(self):
+        r = self.dispatch('run', 'cc-api', 't1', str(self.task), '--repo', str(self.repo))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('不支持的 worker', r.stderr)
 
     def test_propagates_acpx_exit_code(self):
         r = self.dispatch('run', 'codex', 't1', str(self.task), '--repo', str(self.repo), FAKE_RC='3')
